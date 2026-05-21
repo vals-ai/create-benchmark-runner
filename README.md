@@ -28,10 +28,6 @@ make docker-build
   - `templates/` — Jinja templates for generated runner repos
 - `tests/` — framework tests
 
-## Design
-
-See `docs/superpowers/specs/2026-05-20-runner-framework-design.md` (in the parent workspace) for the full design rationale.
-
 ## Implementing a benchmark runner
 
 Authors typically only write `runner/benchmark.py`:
