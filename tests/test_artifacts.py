@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from benchmark_runner.artifacts import RunArtifacts
@@ -66,6 +68,23 @@ def test_generation_eval_and_final_score_round_trip(tmp_path):
     sr = ScoreResult(tasks_evaluated=["t1"], final_score=0.8, metadata={}, complete=True)
     art.save_final_score(sr)
     assert art.load_final_score() == sr
+
+
+def test_saved_generation_includes_legacy_answer_field(tmp_path):
+    art = RunArtifacts(results_dir=tmp_path, run_id="r1")
+    gen = GenerationResult(
+        task_id="t1",
+        status=GenerationStatus.SUCCESS,
+        data="42",
+        generation_version="abc",
+    )
+
+    art.save_generation("t1", gen)
+
+    raw = json.loads(art.generation_path("t1").read_text())
+    assert raw["data"] == "42"
+    assert raw["answer"] == "42"
+    assert art.load_generation("t1") == gen
 
 
 def test_creates_parent_dirs_on_save(tmp_path):

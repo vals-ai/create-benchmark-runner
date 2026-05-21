@@ -59,7 +59,9 @@ class RunArtifacts:
         return GenerationResult.model_validate(raw)
 
     def save_generation(self, task_id: str, gen: GenerationResult) -> None:
-        _save_json(self.generation_path(task_id), gen.model_dump(mode="json"))
+        data = gen.model_dump(mode="json")
+        data.setdefault("answer", gen.data)
+        _save_json(self.generation_path(task_id), data)
 
     def load_eval(self, task_id: str) -> EvalResult | None:
         raw = _load_json(self.eval_path(task_id))

@@ -43,8 +43,8 @@ def test_run_writes_generation_and_eval(make_test_adapter, tmp_path, monkeypatch
         assert ev_path.exists()
         gen = json.loads(gen_path.read_text())
         assert gen["status"] == "success"
-        assert "data" in gen
-        assert "answer" not in gen
+        assert gen["data"] == f"answer-{tid}"
+        assert gen["answer"] == f"answer-{tid}"
 
     cfg = json.loads((tmp_path / "r1" / "run_config.json").read_text())
     assert cfg["payload_schema"] == "test-bench.text.v1"
