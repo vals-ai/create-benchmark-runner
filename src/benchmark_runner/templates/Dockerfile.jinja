@@ -1,0 +1,30 @@
+FROM python:3.12-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends git curl openssh-client \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md ./
+# Uncomment if you vendor your agent as a git submodule:
+# COPY {{ benchmark_name }}-agent/ {{ benchmark_name }}-agent/
+COPY runner/ runner/
+COPY data/ data/
+
+RUN uv sync --frozen --no-dev
+
+ENV PATH="/app/.venv/bin:$PATH"
+RUN ln -s /app/.venv/bin/{{ benchmark_name }}-runner /usr/local/bin/{{ benchmark_name }}-runner
+
+ENV RESULTS_DIR=/app/results
+RUN mkdir -p /app/results /app/data
+
+# Provenance stamp. CI passes the short git SHA via --build-arg so that every
+# generation.json produced by this image records which commit built it.
+ARG {{ benchmark_upper }}_GENERATION_VERSION=dev
+ENV {{ benchmark_upper }}_GENERATION_VERSION=${{ '{' }}{{ benchmark_upper }}_GENERATION_VERSION}
+
+VOLUME /app/results
+ENTRYPOINT ["{{ benchmark_name }}-runner"]

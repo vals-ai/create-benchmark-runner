@@ -1,0 +1,7 @@
+"""{{ benchmark_name }}-runner CLI."""
+
+from benchmark_runner.cli import make_cli
+
+from .benchmark import {{ benchmark_camel }}Runner
+
+cli = make_cli({{ benchmark_camel }}Runner)

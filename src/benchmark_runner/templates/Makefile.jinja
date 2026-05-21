@@ -1,0 +1,17 @@
+.PHONY: install lock sync docker-build help
+
+help: ## Show this help message
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-18s\033[0m %s\n", $$1, $$2}'
+
+install: ## Sync deps
+	uv sync
+
+lock: ## Re-lock pyproject deps
+	uv lock
+
+sync: ## uv sync only
+	uv sync
+
+docker-build: ## Build the {{ benchmark_name }}-runner image
+	docker build --build-arg {{ benchmark_upper }}_GENERATION_VERSION=$$(git rev-parse --short HEAD 2>/dev/null || echo dev) \
+		-t {{ benchmark_name }}-runner:latest .

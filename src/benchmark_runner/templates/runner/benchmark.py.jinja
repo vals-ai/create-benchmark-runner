@@ -1,0 +1,53 @@
+"""{{ benchmark_camel }} benchmark adapter.
+
+Implement `load_tasks` and `generate`. `evaluate` and `score` use the framework
+defaults that POST to the benchmark service; override only if your benchmark
+needs special pre/post-processing.
+"""
+
+import json
+from pathlib import Path
+
+from benchmark_runner import (
+    BenchmarkRunner,
+    GenerationResult,
+    GenerationStatus,
+    Task,
+)
+from model_library.base import LLMConfig
+
+DEFAULT_DATASET_FILE = str(Path(__file__).parent.parent / "data" / "dataset.json")
+DEFAULT_AGENT_TIMEOUT = 1800
+
+
+class {{ benchmark_camel }}Runner(BenchmarkRunner):
+    NAME = "{{ benchmark_name }}"
+    PAYLOAD_TYPE = "text"  # or "artifact"
+    PAYLOAD_SCHEMA_VERSION = 1
+    GENERATION_VERSION_ENV = "{{ benchmark_upper }}_GENERATION_VERSION"
+
+    def load_tasks(self, dataset_file: str | None) -> list[Task]:
+        """Load tasks from the bundled dataset file. Subclass Task and add
+        per-task fields here if your benchmark needs them."""
+        path = dataset_file or DEFAULT_DATASET_FILE
+        with open(path) as f:
+            data = json.load(f)
+        self._dataset = data.get("dataset_name")
+        tasks: list[Task] = []
+        for raw in data.get("tests", []):
+            t = Task(id=raw["id"], question=raw["question"])
+            tasks.append(t)
+        return tasks
+
+    async def generate(
+        self,
+        task: Task,
+        model: str,
+        llm_config: LLMConfig | None = None,
+        log_dir: Path | None = None,
+    ) -> GenerationResult:
+        """Run your agent on one task. TODO: implement."""
+        raise NotImplementedError(
+            "Implement {{ benchmark_camel }}Runner.generate(). See the spec for "
+            "what each GenerationStatus value means."
+        )

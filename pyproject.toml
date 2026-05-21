@@ -1,0 +1,54 @@
+[project]
+name = "create-benchmark-runner"
+version = "0.1.0"
+description = "Shared runner framework and scaffolder for Vals benchmarks."
+requires-python = ">=3.12"
+authors = [{name = "Vals AI, Inc.", email = "contact@vals.ai"}]
+readme = "README.md"
+
+dependencies = [
+    "click>=8.3.2",
+    "jinja2>=3.0",
+    "pydantic>=2.0",
+    "python-dotenv>=1.0.0",
+    "tqdm>=4.67.1",
+    "create-benchmark-service @ git+ssh://git@github.com/vals-ai/create-benchmark-service.git@main",
+    "model-library>=0.1.25",
+]
+
+[project.scripts]
+create-benchmark-runner = "benchmark_runner.scaffolder.main:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/benchmark_runner"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.15",
+    "basedpyright>=1.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
+
+[tool.basedpyright]
+venvPath = "."
+venv = ".venv"
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
+reportExplicitAny = false
+exclude = ["src/benchmark_runner/templates/**", ".venv/**"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"

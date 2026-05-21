@@ -1,0 +1,34 @@
+# {{ benchmark_name }}-runner
+
+Generation + eval container for the {{ benchmark_camel }} benchmark.
+
+## Quick start
+
+```bash
+make install
+# Edit runner/benchmark.py — implement load_tasks() and generate()
+# Drop your dataset into data/
+make docker-build
+docker run --rm -it {{ benchmark_name }}-runner:latest \
+    run --model gpt-5 --run-id smoke
+```
+
+## CLI
+
+```
+{{ benchmark_name }}-runner run --model M --run-id R [TASK_IDS...]
+    [--skip-eval] [--problem PATH] [--dataset-file F]
+    [--results-dir D] [--service-url URL] [--parallelism N] [--timeout S]
+    [--max-tokens N] [--temperature F] [--top-p F] [--top-k N]
+    [--reasoning-effort S]
+    [--custom-endpoint U] [--custom-api-key K]
+    [--chat-completions] [--disable-streaming]
+
+{{ benchmark_name }}-runner score --run-id R [--force]
+```
+
+## Environment
+
+- `SERVICE_URL` — benchmark service URL (override with `--service-url`)
+- `VALS_AUTH_KEY` (Descope) **or** `BENCHMARK_API_KEY` (bearer) — auth
+- `{{ benchmark_upper }}_GENERATION_VERSION` — provenance stamp baked into generation.json
