@@ -1,9 +1,4 @@
-"""Runner-side wire schemas. Shared between adapters, the CLI, and on-disk artifacts.
-
-Re-imports `EvaluateResponseRequest` and `FinalScoreResponse` from
-`benchmark_service.schemas` to keep one source of truth for the wire types
-the service consumes.
-"""
+"""Runner-side schemas."""
 
 from enum import StrEnum
 from typing import Any
@@ -17,10 +12,6 @@ from benchmark_service.schemas import (
 
 
 class Task(BaseModel):
-    """Base task. Benchmarks subclass for per-task fields they need
-    (system prompt override, docker image, problem path inside a sandbox, etc.).
-    The `extra="allow"` config lets ad-hoc fields ride along without subclassing."""
-
     model_config = ConfigDict(extra="allow")
     id: str
     question: str
@@ -49,7 +40,6 @@ class GenerationResult(BaseModel):
 
     @property
     def answer(self) -> str:
-        """Compatibility alias for older runners that still read `answer`."""
         return self.data
 
 
@@ -61,9 +51,6 @@ class EvalStatus(StrEnum):
 
 
 class EvalResultData(BaseModel):
-    """Common fields every eval result carries. Benchmarks subclass for typed
-    benchmark-specific fields (FAB v2 adds `llm_output`, `check_results`)."""
-
     model_config = ConfigDict(extra="allow")
     pass_percentage: float | None = None
     eval_version: str | None = None

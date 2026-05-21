@@ -1,5 +1,3 @@
-"""On-disk artifact layout."""
-
 import pytest
 
 from benchmark_runner.artifacts import RunArtifacts

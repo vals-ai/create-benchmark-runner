@@ -1,5 +1,3 @@
-"""Run-config bootstrap and resume detection."""
-
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import (
     is_eval_redoable,

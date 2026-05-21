@@ -1,9 +1,4 @@
-"""Assemble an LLMConfig from the CLI's sampling/provider flags.
-
-Replaces the ~25 lines of LLMConfig assembly duplicated between fabv2-runner
-and legal-research-runner. CLI options surfaced by `make_cli()` flow into
-this function via keyword.
-"""
+"""Build model-library configuration from runner CLI options."""
 
 from typing import Any
 
@@ -24,7 +19,6 @@ def build_llm_config(
     chat_completions: bool = False,
     disable_streaming: bool = False,
 ) -> LLMConfig:
-    """Build an LLMConfig from CLI-level kwargs."""
     kwargs: dict[str, Any] = {}
     for field, val in [
         ("max_tokens", max_tokens),

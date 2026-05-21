@@ -1,5 +1,3 @@
-"""Auth resolution and client builder."""
-
 from benchmark_runner.client import build_client
 
 

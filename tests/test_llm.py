@@ -1,5 +1,3 @@
-"""LLMConfig assembly from CLI/env kwargs."""
-
 from benchmark_runner.llm import build_llm_config
 
 

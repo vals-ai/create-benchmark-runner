@@ -1,5 +1,3 @@
-"""CLI integration tests for the score command."""
-
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -66,7 +64,7 @@ def test_score_incomplete_run_requires_force(make_test_adapter, tmp_path, monkey
     monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
-    _seed_run(tmp_path, all_evaluated=False)  # t2 has no eval
+    _seed_run(tmp_path, all_evaluated=False)
 
     TestRunner = make_test_adapter()
     cli = make_cli(TestRunner)

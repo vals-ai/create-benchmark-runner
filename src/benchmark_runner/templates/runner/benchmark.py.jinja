@@ -1,9 +1,4 @@
-"""{{ benchmark_camel }} benchmark adapter.
-
-Implement `load_tasks` and `generate`. `evaluate` and `score` use the framework
-defaults that POST to the benchmark service; override only if your benchmark
-needs special pre/post-processing.
-"""
+"""{{ benchmark_camel }} benchmark adapter."""
 
 import json
 from pathlib import Path
@@ -27,8 +22,6 @@ class {{ benchmark_camel }}Runner(BenchmarkRunner):
     GENERATION_VERSION_ENV = "{{ benchmark_upper }}_GENERATION_VERSION"
 
     def load_tasks(self, dataset_file: str | None) -> list[Task]:
-        """Load tasks from the bundled dataset file. Subclass Task and add
-        per-task fields here if your benchmark needs them."""
         path = dataset_file or DEFAULT_DATASET_FILE
         with open(path) as f:
             data = json.load(f)
@@ -46,8 +39,6 @@ class {{ benchmark_camel }}Runner(BenchmarkRunner):
         llm_config: LLMConfig | None = None,
         log_dir: Path | None = None,
     ) -> GenerationResult:
-        """Run your agent on one task. TODO: implement."""
         raise NotImplementedError(
-            "Implement {{ benchmark_camel }}Runner.generate(). See the spec for "
-            "what each GenerationStatus value means."
+            "Implement {{ benchmark_camel }}Runner.generate()."
         )

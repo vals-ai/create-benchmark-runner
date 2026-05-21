@@ -1,12 +1,4 @@
-"""Click CLI factory for benchmark runners.
-
-`make_cli(runner_cls, ...)` returns a Click group with `run` and `score`
-commands fully wired up against the adapter. Generated runners use it as:
-
-    cli = make_cli(MyRunner)
-
-and expose `cli` as the package entrypoint.
-"""
+"""Click CLI factory for benchmark runners."""
 
 import asyncio
 import importlib.metadata
@@ -46,20 +38,17 @@ def make_cli(
     default_timeout: int = 1800,
     extra_run_options: list[Any] | None = None,
 ) -> click.Group:
-    """Build a Click group with `run` and `score` commands wired to `runner_cls`."""
-
     @click.group()
     def cli():
-        """Benchmark runner."""
         load_dotenv(Path(".env"), override=True)
 
     @cli.command()
     @click.option("--model", required=True, help="Model identifier")
     @click.option("--run-id", required=True, help="Unique run identifier")
     @click.argument("task_ids", nargs=-1)
-    @click.option("--skip-eval", is_flag=True, help="Generate only, skip evaluation (Valkyrie path)")
+    @click.option("--skip-eval", is_flag=True, help="Generate only, skip evaluation")
     @click.option("--problem", "problem_path", default=None,
-                  help="Path to a problem-statement file (single-task / Valkyrie mode)")
+                  help="Path to a problem-statement file")
     @click.option("--dataset-file", default=default_dataset_file)
     @click.option("--results-dir", default=default_results_dir)
     @click.option("--service-url", default=None,
@@ -88,7 +77,7 @@ def make_cli(
         custom_endpoint: str | None, custom_api_key: str | None,
         chat_completions: bool, disable_streaming: bool,
     ):
-        """Generate and evaluate tasks. Checkpointed and resumable."""
+        """Generate and evaluate tasks."""
         if disable_streaming and not chat_completions:
             raise click.UsageError("--disable-streaming requires --chat-completions")
         if problem_path and len(task_ids) != 1:
@@ -142,7 +131,6 @@ async def _run_impl(
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     runner = runner_cls(service_url=service_url)
 
-    # Task loading: problem mode > load_tasks()
     if problem_path:
         assert len(task_ids) == 1
         question = Path(problem_path).read_text(encoding="utf-8").strip()
@@ -313,7 +301,6 @@ async def _score_impl(
     runner = runner_cls(service_url=service_url, dataset_name=dataset_name)
     if dataset_file is not None:
         runner.load_tasks(dataset_file)
-    # Register exactly the run-config task set so default score() pads this run, not the full dataset.
     runner._register_tasks([Task(id=tid, question="") for tid in task_ids])
 
     eval_results = []

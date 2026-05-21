@@ -458,7 +458,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8.3.2" },
-    { name = "create-benchmark-service", git = "ssh://git@github.com/vals-ai/create-benchmark-service.git?rev=main" },
+    { name = "create-benchmark-service", git = "ssh://git@github.com/vals-ai/create-benchmark-service.git?rev=v0.3.1" },
     { name = "jinja2", specifier = ">=3.0" },
     { name = "model-library", specifier = ">=0.1.25" },
     { name = "pydantic", specifier = ">=2.0" },
@@ -477,7 +477,7 @@ dev = [
 [[package]]
 name = "create-benchmark-service"
 version = "0.3.1"
-source = { git = "ssh://git@github.com/vals-ai/create-benchmark-service.git?rev=main#12c1393a969903e63fee8864c0b2a1a294f79ed2" }
+source = { git = "ssh://git@github.com/vals-ai/create-benchmark-service.git?rev=v0.3.1#12c1393a969903e63fee8864c0b2a1a294f79ed2" }
 dependencies = [
     { name = "cachetools" },
     { name = "click" },

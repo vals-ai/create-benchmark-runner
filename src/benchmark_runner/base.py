@@ -1,6 +1,4 @@
-"""BenchmarkRunner ABC. Adapters subclass this and implement `load_tasks`
-and `generate`; `evaluate` and `score` have default implementations that
-POST to the existing internal benchmark service endpoints."""
+"""Benchmark runner base class."""
 
 import asyncio
 import os
@@ -23,13 +21,6 @@ from benchmark_runner.schemas import (
 
 
 class BenchmarkRunner(ABC):
-    """Adapter base class for a benchmark runner.
-
-    Subclasses set four class constants identifying the runner, and
-    implement `load_tasks` and `generate`. Defaults for `evaluate` and
-    `score` POST to the benchmark service through `self._client`.
-    """
-
     NAME: str
     PAYLOAD_TYPE: str = "text"
     PAYLOAD_SCHEMA_VERSION: int = 1
@@ -48,13 +39,7 @@ class BenchmarkRunner(ABC):
 
     @abstractmethod
     def load_tasks(self, dataset_file: str | None) -> list[Task]:
-        """Load tasks from a bundled file (or wherever the adapter sources them).
-
-        The framework registers each returned Task before invoking generate/score.
-        Adapters may also set `self._dataset` (the benchmark service's dataset
-        name, often from the dataset file's `dataset_name` field) so the default
-        evaluate/score calls forward it to the service.
-        """
+        """Load task definitions for a run."""
 
     @abstractmethod
     async def generate(
@@ -64,11 +49,9 @@ class BenchmarkRunner(ABC):
         llm_config: LLMConfig | None = None,
         log_dir: Path | None = None,
     ) -> GenerationResult:
-        """Run the benchmark's agent on one task and return a GenerationResult."""
+        """Generate a task result."""
 
     async def evaluate(self, task_id: str, generation: GenerationResult) -> EvalResult:
-        """Default per-task evaluation. Short-circuits on DID_NOT_COMPLETE or
-        GENERATION_ERROR; otherwise POSTs the generated data to /evaluate-response/."""
         if generation.status in (GenerationStatus.MAX_TIME, GenerationStatus.MAX_TURNS):
             return EvalResult(task_id=task_id, status=EvalStatus.DID_NOT_COMPLETE)
         if generation.status != GenerationStatus.SUCCESS:
@@ -90,8 +73,6 @@ class BenchmarkRunner(ABC):
             return EvalResult(task_id=task_id, status=EvalStatus.ERROR, error=str(e))
 
     async def score(self, eval_results: list[EvalResult]) -> ScoreResult:
-        """Default final scoring. Pads missing tasks with null per the contract
-        and posts to /final-score/. Returns a ScoreResult."""
         submitted: dict[str, Any] = {ev.task_id: ev.model_dump(mode="json") for ev in eval_results}
         for tid in self._tasks:
             if tid not in submitted:
@@ -105,8 +86,6 @@ class BenchmarkRunner(ABC):
         )
 
     async def _fetch_task(self, task_id: str) -> Task:
-        """Forward-compat hook for `GET /v1/tasks/{task_id}`. Adapters override
-        to enable service-side dataset loading; default raises."""
         raise NotImplementedError(
             f"{type(self).__name__} does not support service-side task fetch"
         )
@@ -118,11 +97,9 @@ class BenchmarkRunner(ABC):
         self._tasks = {task.id: task for task in tasks}
 
     def add_task(self, task: Task) -> None:
-        """Public alias for `_register_task`. Used by the `--problem` single-task path."""
         self._register_task(task)
 
     def get_tasks(self) -> list[Task]:
-        """Deterministic sorted-by-id task list."""
         return [t for _, t in sorted(self._tasks.items())]
 
     @property

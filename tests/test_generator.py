@@ -1,5 +1,3 @@
-"""Generator: name transforms, validation, project rendering."""
-
 import pytest
 
 from benchmark_runner.scaffolder.generator import generate_project, transform_name, validate_name
@@ -26,7 +24,6 @@ def test_validate_name_accepts_project_names_and_rejects_invalid_ones():
 
 
 def test_generate_project_creates_expected_files(tmp_path, monkeypatch):
-    """End-to-end generation: every templated file should be rendered."""
     templates_dir = tmp_path / "fake_templates"
     templates_dir.mkdir()
     (templates_dir / "pyproject.toml.jinja").write_text('name = "{{ benchmark_name }}-runner"\n')

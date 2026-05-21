@@ -3,7 +3,6 @@ name = "create-benchmark-runner"
 version = "0.1.0"
 description = "Shared runner framework and scaffolder for Vals benchmarks."
 requires-python = ">=3.12"
-authors = [{name = "Vals AI, Inc.", email = "contact@vals.ai"}]
 readme = "README.md"
 
 dependencies = [
@@ -12,7 +11,7 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0.0",
     "tqdm>=4.67.1",
-    "create-benchmark-service @ git+ssh://git@github.com/vals-ai/create-benchmark-service.git@main",
+    "create-benchmark-service @ git+ssh://git@github.com/vals-ai/create-benchmark-service.git@v0.3.1",
     "model-library>=0.1.25",
 ]
 

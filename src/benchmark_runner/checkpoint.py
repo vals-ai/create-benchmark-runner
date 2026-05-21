@@ -1,8 +1,4 @@
-"""Run-config bootstrap and resume detection.
-
-Centralizes the logic that both existing runners had inline in their
-`_load_run` and per-task `process()` functions.
-"""
+"""Run-config bootstrap and resume detection."""
 
 from typing import Any
 
@@ -22,11 +18,7 @@ def load_or_create_run_config(
     runner_version: str,
     generation_version: str,
 ) -> tuple[dict[str, Any], bool]:
-    """Load an existing run_config.json or stamp a new one.
-
-    Returns (config, was_resumed). On resume, the on-disk config wins;
-    the caller's arguments are ignored.
-    """
+    """Load an existing run_config.json or stamp a new one."""
     existing = artifacts.load_run_config()
     if existing is not None:
         return existing, True
@@ -47,7 +39,6 @@ def load_or_create_run_config(
 
 
 def is_generation_redoable(artifacts: RunArtifacts, task_id: str) -> bool:
-    """True if generation.json is missing or in an error state."""
     gen = artifacts.load_generation(task_id)
     if gen is None:
         return True
@@ -55,7 +46,6 @@ def is_generation_redoable(artifacts: RunArtifacts, task_id: str) -> bool:
 
 
 def is_eval_redoable(artifacts: RunArtifacts, task_id: str) -> bool:
-    """True if eval.json is missing or in an error / generation_error state."""
     ev = artifacts.load_eval(task_id)
     if ev is None:
         return True

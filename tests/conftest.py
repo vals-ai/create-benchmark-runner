@@ -1,5 +1,3 @@
-"""Shared test fixtures: a mock BenchmarkServiceClient and a minimal test adapter."""
-
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -10,7 +8,6 @@ from benchmark_runner import BenchmarkRunner, GenerationResult, GenerationStatus
 
 @pytest.fixture
 def mock_client():
-    """Returns a Mock with the BenchmarkServiceClient async methods stubbed."""
     client = AsyncMock()
     client.evaluate_response = AsyncMock(return_value={
         "pass_percentage": 0.8,
@@ -22,8 +19,6 @@ def mock_client():
 
 @pytest.fixture
 def make_test_adapter():
-    """Returns a factory that builds a configurable test adapter class."""
-
     def _make(*, generate_status: GenerationStatus = GenerationStatus.SUCCESS):
         class TestRunner(BenchmarkRunner):
             NAME = "test-bench"

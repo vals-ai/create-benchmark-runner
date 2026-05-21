@@ -1,5 +1,3 @@
-"""Tests for benchmark_runner schemas: serialization, defaults, extensibility."""
-
 from benchmark_runner.schemas import (
     EvalResult,
     EvalResultData,
@@ -58,11 +56,11 @@ def test_eval_result_data_allows_extra_and_typed_subclass_fields():
     extra = EvalResultData(pass_percentage=0.83, eval_version="v1", llm_output="...")  # pyright: ignore[reportCallIssue]
     assert extra.model_dump()["llm_output"] == "..."
 
-    class FABEvalResultData(EvalResultData):
+    class TypedEvalResultData(EvalResultData):
         llm_output: str
         check_results: list[dict]
 
-    data = FABEvalResultData(
+    data = TypedEvalResultData(
         pass_percentage=0.83,
         eval_version="v1",
         llm_output="...",

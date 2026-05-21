@@ -1,7 +1,3 @@
-"""End-to-end: generate a runner via the scaffolder, verify the result imports
-cleanly and that pyproject.toml is parseable. This is the cross-check that the
-templates + generator + library hang together as a unit."""
-
 import subprocess
 import tomllib
 from pathlib import Path
@@ -49,8 +45,6 @@ def test_e2e_generated_runner_is_well_formed(tmp_path, monkeypatch):
 
 
 def test_e2e_python_compile_check(tmp_path, monkeypatch):
-    """Run `python -m py_compile` on every .py file in the generated tree to
-    catch syntax errors in the templates."""
     monkeypatch.chdir(tmp_path)
     cli_runner = CliRunner()
     result = cli_runner.invoke(main, ["my-bench", "--templates-dir", str(TEMPLATES_DIR)])

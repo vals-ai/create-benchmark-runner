@@ -1,4 +1,4 @@
-"""Scaffolder generator: name transforms, validation, Jinja project rendering."""
+"""Scaffolder project generation."""
 
 import re
 import shutil
@@ -10,14 +10,13 @@ from jinja2 import Environment, FileSystemLoader
 
 
 class BenchmarkNames(TypedDict):
-    benchmark_name: str       # "cyber-bench"
-    benchmark_camel: str      # "CyberBench"
-    benchmark_upper: str      # "CYBER_BENCH"
-    benchmark_package: str    # always "runner"
+    benchmark_name: str
+    benchmark_camel: str
+    benchmark_upper: str
+    benchmark_package: str
 
 
 def transform_name(name: str) -> BenchmarkNames:
-    """Build the various forms of a benchmark name used in templates."""
     benchmark_name = name.lower().replace("_", "-")
     parts = benchmark_name.split("-")
     benchmark_camel = "".join(p.capitalize() for p in parts)
@@ -31,7 +30,6 @@ def transform_name(name: str) -> BenchmarkNames:
 
 
 def validate_name(name: str) -> None:
-    """Validate a benchmark name. Mirrors create-benchmark-service's rules."""
     if not name:
         raise ValueError("Benchmark name cannot be empty")
     if not re.match(r"^[a-zA-Z0-9_-]+$", name):
@@ -54,13 +52,7 @@ def generate_project(
     output_dir: Path,
     templates_dir: Path,
 ) -> None:
-    """Render every Jinja template in `templates_dir` into `output_dir`.
-
-    File-name semantics:
-        foo.jinja           -> foo
-        runner/foo.py.jinja -> runner/foo.py
-        path/.gitkeep       -> skipped (placeholder)
-    """
+    """Render every Jinja template in `templates_dir` into `output_dir`."""
     validate_name(benchmark_name)
     if output_dir.exists():
         raise FileExistsError(f"Directory {output_dir} already exists.")
@@ -92,7 +84,6 @@ def generate_project(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dest)
 
-    # Always create data/ and tests/ directories for bundled datasets and authored tests.
     (output_dir / "data").mkdir(exist_ok=True)
     (output_dir / "tests").mkdir(exist_ok=True)
     (output_dir / "tests" / "__init__.py").write_text("")

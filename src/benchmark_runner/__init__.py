@@ -1,11 +1,4 @@
-"""benchmark_runner: shared runner library for Vals benchmarks.
-
-Public API:
-    BenchmarkRunner, make_cli, build_client, build_llm_config,
-    RunArtifacts, Task, GenerationResult, GenerationStatus,
-    EvalResult, EvalResultData, EvalStatus, ScoreResult,
-    EvaluateResponseRequest, FinalScoreResponse  (re-exported from create-benchmark-service)
-"""
+"""Public package exports."""
 
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.base import BenchmarkRunner

@@ -1,16 +1,12 @@
 """On-disk artifact layout for a benchmark run.
 
 results/<run_id>/
-    run_config.json          # frozen task list + provenance fields
-    final_score.json         # aggregate, written by `score`
+    run_config.json
+    final_score.json
     <task_id>/
-        generation.json      # written by `generate`
-        eval.json            # written by `evaluate`
-        agent_logs/          # adapter-owned; not touched by the framework
-
-This layout is part of the runner contract: Valkyrie's evaluate_instance
-reads generation.json directly from the sandbox at the path above. Changes
-here require a coordinated Valkyrie agent-registry update.
+        generation.json
+        eval.json
+        agent_logs/
 """
 
 import json
@@ -21,8 +17,6 @@ from benchmark_runner.schemas import EvalResult, GenerationResult, ScoreResult
 
 
 class RunArtifacts:
-    """File-layout helper for one run directory."""
-
     def __init__(self, results_dir: Path | str, run_id: str):
         self._results_dir = Path(results_dir)
         self._run_id = run_id

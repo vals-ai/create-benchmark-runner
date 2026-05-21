@@ -1,5 +1,3 @@
-"""BenchmarkRunner ABC behavior: helpers and service defaults."""
-
 import pytest
 
 from benchmark_runner import (
