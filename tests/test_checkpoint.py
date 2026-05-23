@@ -20,6 +20,7 @@ def test_load_or_create_stamps_new_run_and_resumes_existing(tmp_path):
         task_ids=["t1", "t2"],
         dataset_file="/data/x.json",
         dataset_name="validation",
+        task_source="file",
         payload_schema="test.text.v1",
         payload_type="text",
         runner_version="0.1.0",
@@ -29,6 +30,7 @@ def test_load_or_create_stamps_new_run_and_resumes_existing(tmp_path):
     assert config["run_id"] == "r1"
     assert config["tasks"] == ["t1", "t2"]
     assert config["dataset_name"] == "validation"
+    assert config["task_source"] == "file"
     assert config["payload_schema"] == "test.text.v1"
     assert config["payload_type"] == "text"
     assert config["runner_version"] == "0.1.0"
@@ -43,6 +45,7 @@ def test_load_or_create_stamps_new_run_and_resumes_existing(tmp_path):
         task_ids=["different"],
         dataset_file=None,
         dataset_name=None,
+        task_source="service",
         payload_schema="x",
         payload_type="x",
         runner_version="x",

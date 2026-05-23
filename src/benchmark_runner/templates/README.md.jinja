@@ -17,7 +17,7 @@ docker run --rm -it {{ benchmark_name }}-runner:latest \
 
 ```
 {{ benchmark_name }}-runner run --model M --run-id R [TASK_IDS...]
-    [--skip-eval] [--problem PATH] [--dataset-file F]
+    [--skip-eval] [--problem PATH] [--dataset-file F] [--dataset-name NAME]
     [--results-dir D] [--service-url URL] [--parallelism N] [--timeout S]
     [--max-tokens N] [--temperature F] [--top-p F] [--top-k N]
     [--reasoning-effort S]
@@ -26,6 +26,20 @@ docker run --rm -it {{ benchmark_name }}-runner:latest \
 
 {{ benchmark_name }}-runner score --run-id R [--force]
 ```
+
+## Service-loaded datasets
+
+By default the runner reads tasks from the bundled dataset file. If the benchmark service exposes `/v1/datasets/{name}/tasks`, use `--dataset-name NAME` to fetch task definitions from the service instead:
+
+```bash
+{{ benchmark_name }}-runner run --model gpt-5 --run-id validation \
+    --service-url https://<service-host> \
+    --dataset-name validation
+```
+
+`--dataset-name` is mutually exclusive with `--dataset-file` and requires Descope auth through `VALS_AUTH_KEY`; legacy `BENCHMARK_API_KEY` bearer auth does not work on `/v1/*` endpoints.
+
+If the service returns benchmark-specific task fields, define a `Task` subclass and set `TASK_MODEL` on the runner so fetched tasks are validated before `generate()` receives them.
 
 ## Environment
 

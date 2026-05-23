@@ -143,21 +143,28 @@ async def _run_impl(
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     runner = runner_cls(service_url=service_url)
 
-    # If resuming a run that was originally service-loaded, honor that source
-    # regardless of which CLI flags were (or weren't) re-passed. This avoids
-    # silently falling back to the bundled file and producing a task-id
-    # mismatch against the saved run_config.json.
+    # If resuming a service-loaded run, honor that source even when the flag
+    # is not re-passed. Older configs did not stamp task_source, so keep the
+    # previous inference only for those files.
     existing_config = artifacts.load_run_config()
     if existing_config and not problem_path and not dataset_name:
-        resumed_dataset_name = existing_config.get("dataset_name")
-        resumed_dataset_file = existing_config.get("dataset_file")
-        if resumed_dataset_name and resumed_dataset_file is None:
+        saved_task_source = existing_config.get("task_source")
+        if saved_task_source == "service":
+            resumed_dataset_name = existing_config.get("dataset_name")
+            if not resumed_dataset_name:
+                raise click.ClickException("run_config.json has task_source=service but no dataset_name")
             dataset_name = resumed_dataset_name
+        elif saved_task_source is None:
+            resumed_dataset_name = existing_config.get("dataset_name")
+            resumed_dataset_file = existing_config.get("dataset_file")
+            if resumed_dataset_name and resumed_dataset_file is None:
+                dataset_name = resumed_dataset_name
 
     if problem_path:
         assert len(task_ids) == 1
         question = Path(problem_path).read_text(encoding="utf-8").strip()
         runner.add_task(Task(id=task_ids[0], question=question))
+        task_source = "problem"
     elif dataset_name:
         try:
             tasks = await runner.load_tasks_from_service(dataset_name)
@@ -166,8 +173,10 @@ async def _run_impl(
                 f"Failed to load dataset '{dataset_name}' from {service_url}: {exc}"
             ) from exc
         runner._register_tasks(tasks)
+        task_source = "service"
     else:
         runner._register_tasks(runner.load_tasks(dataset_file))
+        task_source = "file"
 
     all_task_ids = [t.id for t in runner.get_tasks()]
     config, was_resumed = load_or_create_run_config(
@@ -176,6 +185,7 @@ async def _run_impl(
         task_ids=all_task_ids if not problem_path else task_ids,
         dataset_file=dataset_file if not dataset_name else None,
         dataset_name=dataset_name or runner._dataset,
+        task_source=task_source,
         payload_schema=runner.payload_schema,
         payload_type=runner.PAYLOAD_TYPE,
         runner_version=_runner_framework_version(),

@@ -79,6 +79,17 @@ Auth: Descope only — the runner forwards `VALS_AUTH_KEY` as `x-descope-api-key
 
 `--dataset-name` and `--dataset-file` are mutually exclusive. The existing `--problem <file>` Valkyrie path is unaffected (it never touches the dataset API). If the benchmark service hasn't implemented `list_tasks`, the runner gets a 501 from the endpoint and the run fails with a clear error.
 
+If service-loaded tasks expose benchmark-specific fields, set `TASK_MODEL` on the runner so the framework validates those fields after fetching them:
+
+```python
+class SWEBenchTask(Task):
+    repo: str
+    base_commit: str
+
+class SWEBenchRunner(BenchmarkRunner):
+    TASK_MODEL = SWEBenchTask
+```
+
 ## Development
 
 ```bash

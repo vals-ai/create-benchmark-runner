@@ -4,7 +4,7 @@ import asyncio
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from model_library.base import LLMConfig
 
@@ -25,6 +25,7 @@ class BenchmarkRunner(ABC):
     PAYLOAD_TYPE: str = "text"
     PAYLOAD_SCHEMA_VERSION: int = 1
     GENERATION_VERSION_ENV: str
+    TASK_MODEL: ClassVar[type[Task]] = Task
 
     def __init__(
         self,
@@ -94,9 +95,8 @@ class BenchmarkRunner(ABC):
         """
         response = await self._client.list_tasks(dataset=dataset_name)
         self._dataset = dataset_name
-        # V1Task and Task have the same shape (id, question, timeout) and
-        # both accept extras; convert by model_dump round-trip.
-        return [Task.model_validate(t.model_dump()) for t in response.tasks]
+        # Preserve adapter-specific validation for benchmark-defined task fields.
+        return [self.TASK_MODEL.model_validate(t.model_dump()) for t in response.tasks]
 
     async def _fetch_task(self, task_id: str) -> Task:
         raise NotImplementedError(

@@ -38,6 +38,11 @@ def test_e2e_generated_runner_is_well_formed(tmp_path, monkeypatch):
     assert "from .benchmark import CyberBenchRunner" in cli_py
     assert "make_cli(CyberBenchRunner)" in cli_py
 
+    readme = (out / "README.md").read_text()
+    assert "--dataset-name NAME" in readme
+    assert "VALS_AUTH_KEY" in readme
+    assert "/v1/datasets/{name}/tasks" in readme
+
     assert (out / "data").is_dir()
 
     snap = (out / "push_snapshot.py").read_text()

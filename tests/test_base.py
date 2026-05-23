@@ -110,3 +110,37 @@ async def test_load_tasks_from_service_calls_client_and_sets_dataset(make_test_a
     assert tasks[1].timeout == 180
     assert runner._dataset == "validation"
     mock_client.list_tasks.assert_called_once_with(dataset="validation")
+
+
+@pytest.mark.asyncio
+async def test_load_tasks_from_service_uses_runner_task_model(make_test_adapter, mock_client):
+    """Service-loaded tasks must pass through the adapter's task model."""
+
+    class RepoTask(Task):
+        repo: str
+        base_commit: str
+
+    TestRunner = make_test_adapter()
+
+    class RepoRunner(TestRunner):
+        TASK_MODEL = RepoTask
+
+    runner = RepoRunner(service_url="http://x")
+    runner._client = mock_client
+    mock_client.list_tasks.return_value = V1DatasetTasksResponse(
+        dataset="validation",
+        tasks=[
+            V1Task.model_validate({
+                "id": "swe-1",
+                "question": "fix the bug",
+                "repo": "vals/example",
+                "base_commit": "abc123",
+            }),
+        ],
+    )
+
+    tasks = await runner.load_tasks_from_service("validation")
+
+    assert isinstance(tasks[0], RepoTask)
+    assert tasks[0].repo == "vals/example"
+    assert tasks[0].base_commit == "abc123"
