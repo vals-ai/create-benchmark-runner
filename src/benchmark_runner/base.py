@@ -85,6 +85,19 @@ class BenchmarkRunner(ABC):
             metadata=payload.get("metadata", {}),
         )
 
+    async def load_tasks_from_service(self, dataset_name: str) -> list[Task]:
+        """Fetch tasks for `dataset_name` via the service's /v1/ surface.
+
+        Concrete framework method — adapters do not override. Stamps
+        `self._dataset = dataset_name` so default `evaluate` / `score`
+        forward it to the service alongside per-task calls.
+        """
+        response = await self._client.list_tasks(dataset=dataset_name)
+        self._dataset = dataset_name
+        # V1Task and Task have the same shape (id, question, timeout) and
+        # both accept extras; convert by model_dump round-trip.
+        return [Task.model_validate(t.model_dump()) for t in response.tasks]
+
     async def _fetch_task(self, task_id: str) -> Task:
         raise NotImplementedError(
             f"{type(self).__name__} does not support service-side task fetch"

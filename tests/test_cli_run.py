@@ -8,6 +8,8 @@ from benchmark_runner import BenchmarkRunner, GenerationResult, GenerationStatus
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.cli import make_cli
 from benchmark_runner.schemas import EvalResult, EvalStatus, FinalScoreResponse
+from benchmark_service.client import BenchmarkServiceError
+from benchmark_service.v1_schemas import V1DatasetTasksResponse, V1Task
 
 
 def test_run_writes_generation_and_eval(make_test_adapter, tmp_path, monkeypatch):
@@ -256,3 +258,163 @@ def test_run_enforces_task_timeout(tmp_path, monkeypatch):
     assert gen["status"] == "max_time"
     assert gen["data"] == ""
     assert "timed out" in gen["error"]
+
+
+def test_run_with_dataset_name_fetches_from_service_and_skips_file(
+    make_test_adapter, tmp_path, monkeypatch,
+):
+    """--dataset-name triggers service fetch; --dataset-file is ignored."""
+    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
+
+    TestRunner = make_test_adapter()
+
+    fetched: list[str] = []
+
+    async def stub_list_tasks(self, dataset: str) -> V1DatasetTasksResponse:
+        fetched.append(dataset)
+        return V1DatasetTasksResponse(
+            dataset=dataset,
+            tasks=[V1Task(id="svc-t1", question="from service")],
+        )
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        stub_list_tasks,
+    )
+
+    async def stub_generate(self, task, model, llm_config=None, log_dir=None) -> GenerationResult:
+        return GenerationResult(
+            task_id=task.id, status=GenerationStatus.SUCCESS,
+            data="ok", question=task.question, model=model,
+        )
+
+    monkeypatch.setattr(TestRunner, "generate", stub_generate)
+
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r",
+        "--service-url", "http://svc",
+        "--dataset-name", "validation",
+        "--skip-eval",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert fetched == ["validation"]
+    assert (tmp_path / "r" / "svc-t1" / "generation.json").exists()
+
+
+def test_run_rejects_both_dataset_name_and_dataset_file(make_test_adapter, tmp_path):
+    TestRunner = make_test_adapter()
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r",
+        "--dataset-name", "validation",
+        "--dataset-file", str(tmp_path / "x.json"),
+    ])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower() or "cannot pass both" in result.output.lower()
+
+
+def test_run_rejects_problem_and_dataset_name(make_test_adapter, tmp_path):
+    """--problem (single-task Valkyrie mode) and --dataset-name (service-loading)
+    are conceptually different sources of task content and must not be combined."""
+    TestRunner = make_test_adapter()
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    problem_file = tmp_path / "q.txt"
+    problem_file.write_text("what is fair use?")
+
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r",
+        "--problem", str(problem_file),
+        "--dataset-name", "validation",
+        "VL-1",
+    ])
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
+def test_run_with_dataset_name_converts_service_error_to_click_error(
+    make_test_adapter, tmp_path, monkeypatch,
+):
+    """If the benchmark service returns a non-200 (e.g. 501 because the deploy
+    hasn't overridden list_tasks), the runner should surface a clear
+    ClickException instead of letting BenchmarkServiceError bubble as a
+    Python traceback."""
+    TestRunner = make_test_adapter()
+
+    async def stub_list_tasks(self, dataset: str):
+        raise BenchmarkServiceError("list_tasks not implemented for this benchmark")
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        stub_list_tasks,
+    )
+
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r",
+        "--dataset-name", "validation",
+        "--skip-eval",
+    ])
+    assert result.exit_code != 0
+    # The error should mention the dataset and the underlying service-error text,
+    # not be a raw traceback.
+    assert "validation" in result.output.lower()
+    assert "list_tasks" in result.output.lower() or "not implemented" in result.output.lower()
+
+
+def test_run_resume_honors_service_loaded_run_config(
+    make_test_adapter, tmp_path, monkeypatch,
+):
+    """If a run was originally service-loaded (run_config.json has dataset_name set,
+    dataset_file=None), a resume *without* --dataset-name must still re-fetch from the
+    service rather than falling back to the bundled file with mismatched task ids."""
+    TestRunner = make_test_adapter()
+
+    # Seed an existing run_config that records service-loading.
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="r")
+    artifacts.save_run_config({
+        "run_id": "r",
+        "model": "m",
+        "tasks": ["svc-t1"],
+        "dataset_file": None,
+        "dataset_name": "validation",
+        "payload_schema": "x.text.v1",
+        "payload_type": "text",
+        "runner_version": "0.0.0",
+        "generation_version": "dev",
+    })
+
+    fetched: list[str] = []
+
+    async def stub_list_tasks(self, dataset: str):
+        fetched.append(dataset)
+        return V1DatasetTasksResponse(
+            dataset=dataset,
+            tasks=[V1Task(id="svc-t1", question="from service")],
+        )
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        stub_list_tasks,
+    )
+
+    async def stub_generate(self, task, model, llm_config=None, log_dir=None):
+        return GenerationResult(
+            task_id=task.id, status=GenerationStatus.SUCCESS,
+            data="ok", question=task.question, model=model,
+        )
+    monkeypatch.setattr(TestRunner, "generate", stub_generate)
+
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    # Note: no --dataset-name flag passed; the framework should pick it up from
+    # the existing run_config.
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r", "--skip-eval",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert fetched == ["validation"]
+    assert (tmp_path / "r" / "svc-t1" / "generation.json").exists()

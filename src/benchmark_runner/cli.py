@@ -11,6 +11,8 @@ import click
 from dotenv import load_dotenv
 from tqdm.asyncio import tqdm
 
+from benchmark_service.client import BenchmarkServiceError
+
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.base import BenchmarkRunner
 from benchmark_runner.checkpoint import (
@@ -50,6 +52,9 @@ def make_cli(
     @click.option("--problem", "problem_path", default=None,
                   help="Path to a problem-statement file")
     @click.option("--dataset-file", default=default_dataset_file)
+    @click.option("--dataset-name", default=None,
+                  help="Fetch task list from the service via GET /v1/datasets/{name}/tasks. "
+                       "Mutually exclusive with --dataset-file.")
     @click.option("--results-dir", default=default_results_dir)
     @click.option("--service-url", default=None,
                   help="Override SERVICE_URL env for this invocation")
@@ -70,7 +75,8 @@ def make_cli(
     def run(
         model: str, run_id: str, task_ids: tuple[str, ...],
         skip_eval: bool, problem_path: str | None,
-        dataset_file: str | None, results_dir: str, service_url: str | None,
+        dataset_file: str | None, dataset_name: str | None,
+        results_dir: str, service_url: str | None,
         parallelism: int, task_timeout: float | None,
         max_tokens: int | None, temperature: float | None,
         top_p: float | None, top_k: int | None, reasoning_effort: str | None,
@@ -82,6 +88,10 @@ def make_cli(
             raise click.UsageError("--disable-streaming requires --chat-completions")
         if problem_path and len(task_ids) != 1:
             raise click.UsageError("--problem requires exactly one TASK_ID")
+        if dataset_name and dataset_file and dataset_file != default_dataset_file:
+            raise click.UsageError("--dataset-name and --dataset-file are mutually exclusive")
+        if problem_path and dataset_name:
+            raise click.UsageError("--problem and --dataset-name are mutually exclusive")
 
         custom_endpoint = custom_endpoint or os.environ.get("CUSTOM_ENDPOINT")
         custom_api_key = custom_api_key or os.environ.get("CUSTOM_API_KEY")
@@ -98,7 +108,8 @@ def make_cli(
             runner_cls=runner_cls,
             model=model, run_id=run_id, task_ids=list(task_ids),
             skip_eval=skip_eval, problem_path=problem_path,
-            dataset_file=dataset_file, results_dir=results_dir,
+            dataset_file=dataset_file, dataset_name=dataset_name,
+            results_dir=results_dir,
             service_url=service_url_resolved, parallelism=parallelism,
             default_timeout=task_timeout,
             llm_config=llm_config,
@@ -122,6 +133,7 @@ async def _run_impl(
     skip_eval: bool,
     problem_path: str | None,
     dataset_file: str | None,
+    dataset_name: str | None,
     results_dir: str,
     service_url: str,
     parallelism: int,
@@ -131,10 +143,29 @@ async def _run_impl(
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     runner = runner_cls(service_url=service_url)
 
+    # If resuming a run that was originally service-loaded, honor that source
+    # regardless of which CLI flags were (or weren't) re-passed. This avoids
+    # silently falling back to the bundled file and producing a task-id
+    # mismatch against the saved run_config.json.
+    existing_config = artifacts.load_run_config()
+    if existing_config and not problem_path and not dataset_name:
+        resumed_dataset_name = existing_config.get("dataset_name")
+        resumed_dataset_file = existing_config.get("dataset_file")
+        if resumed_dataset_name and resumed_dataset_file is None:
+            dataset_name = resumed_dataset_name
+
     if problem_path:
         assert len(task_ids) == 1
         question = Path(problem_path).read_text(encoding="utf-8").strip()
         runner.add_task(Task(id=task_ids[0], question=question))
+    elif dataset_name:
+        try:
+            tasks = await runner.load_tasks_from_service(dataset_name)
+        except BenchmarkServiceError as exc:
+            raise click.ClickException(
+                f"Failed to load dataset '{dataset_name}' from {service_url}: {exc}"
+            ) from exc
+        runner._register_tasks(tasks)
     else:
         runner._register_tasks(runner.load_tasks(dataset_file))
 
@@ -143,8 +174,8 @@ async def _run_impl(
         artifacts=artifacts,
         model=model,
         task_ids=all_task_ids if not problem_path else task_ids,
-        dataset_file=dataset_file,
-        dataset_name=runner._dataset,
+        dataset_file=dataset_file if not dataset_name else None,
+        dataset_name=dataset_name or runner._dataset,
         payload_schema=runner.payload_schema,
         payload_type=runner.PAYLOAD_TYPE,
         runner_version=_runner_framework_version(),
@@ -245,7 +276,7 @@ async def _run_impl(
                     results_dir=results_dir,
                     service_url=service_url,
                     force=False,
-                    dataset_file=dataset_file,
+                    dataset_file=dataset_file if not dataset_name else None,
                 )
             except click.ClickException:
                 raise
