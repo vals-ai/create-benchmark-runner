@@ -2,7 +2,6 @@ import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
-import pytest
 from click.testing import CliRunner
 
 from benchmark_runner import BenchmarkRunner, GenerationResult, GenerationStatus, Task
@@ -371,31 +370,27 @@ def test_run_with_dataset_name_converts_service_error_to_click_error(
     assert "list_tasks" in result.output.lower() or "not implemented" in result.output.lower()
 
 
-@pytest.mark.parametrize("task_source", ["service", None])
 def test_run_resume_honors_service_loaded_run_config(
-    make_test_adapter, tmp_path, monkeypatch, task_source,
+    make_test_adapter, tmp_path, monkeypatch,
 ):
-    """If a run was originally service-loaded (run_config.json has dataset_name set,
-    dataset_file=None), a resume *without* --dataset-name must still re-fetch from the
-    service rather than falling back to the bundled file with mismatched task ids."""
+    """If a run was service-loaded, a resume without --dataset-name must still
+    re-fetch from the service rather than falling back to the bundled file."""
     TestRunner = make_test_adapter()
 
     # Seed an existing run_config that records service-loading.
     artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="r")
-    config = {
+    artifacts.save_run_config({
         "run_id": "r",
         "model": "m",
         "tasks": ["svc-t1"],
         "dataset_file": None,
         "dataset_name": "validation",
+        "task_source": "service",
         "payload_schema": "x.text.v1",
         "payload_type": "text",
         "runner_version": "0.0.0",
         "generation_version": "dev",
-    }
-    if task_source is not None:
-        config["task_source"] = task_source
-    artifacts.save_run_config(config)
+    })
 
     fetched: list[str] = []
 
@@ -445,6 +440,43 @@ def test_run_resume_file_task_source_does_not_infer_service_loading(
         "dataset_file": None,
         "dataset_name": "validation",
         "task_source": "file",
+        "payload_schema": "test-bench.text.v1",
+        "payload_type": "text",
+        "runner_version": "0.0.0",
+        "generation_version": "dev",
+    })
+
+    async def fail_list_tasks(self, dataset: str):
+        raise AssertionError(f"unexpected service task fetch for {dataset}")
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        fail_list_tasks,
+    )
+
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r", "--skip-eval",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "r" / "t1" / "generation.json").exists()
+    assert (tmp_path / "r" / "t2" / "generation.json").exists()
+
+
+def test_run_resume_legacy_config_does_not_infer_service_loading(
+    make_test_adapter, tmp_path, monkeypatch,
+):
+    """Configs without task_source predate --dataset-name, so they are file-loaded."""
+    TestRunner = make_test_adapter()
+
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="r")
+    artifacts.save_run_config({
+        "run_id": "r",
+        "model": "m",
+        "tasks": ["t1", "t2"],
+        "dataset_file": None,
+        "dataset_name": "validation",
         "payload_schema": "test-bench.text.v1",
         "payload_type": "text",
         "runner_version": "0.0.0",

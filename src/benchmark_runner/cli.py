@@ -143,9 +143,8 @@ async def _run_impl(
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     runner = runner_cls(service_url=service_url)
 
-    # If resuming a service-loaded run, honor that source even when the flag
-    # is not re-passed. Older configs did not stamp task_source, so keep the
-    # previous inference only for those files.
+    # If resuming a service-loaded run, honor that explicit source even when
+    # --dataset-name is not re-passed.
     existing_config = artifacts.load_run_config()
     if existing_config and not problem_path and not dataset_name:
         saved_task_source = existing_config.get("task_source")
@@ -154,11 +153,6 @@ async def _run_impl(
             if not resumed_dataset_name:
                 raise click.ClickException("run_config.json has task_source=service but no dataset_name")
             dataset_name = resumed_dataset_name
-        elif saved_task_source is None:
-            resumed_dataset_name = existing_config.get("dataset_name")
-            resumed_dataset_file = existing_config.get("dataset_file")
-            if resumed_dataset_name and resumed_dataset_file is None:
-                dataset_name = resumed_dataset_name
 
     if problem_path:
         assert len(task_ids) == 1
