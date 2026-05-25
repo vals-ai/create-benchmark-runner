@@ -322,6 +322,35 @@ def test_run_rejects_both_dataset_name_and_dataset_file(make_test_adapter, tmp_p
     assert "mutually exclusive" in result.output.lower() or "cannot pass both" in result.output.lower()
 
 
+def test_run_rejects_dataset_name_with_explicit_default_dataset_file(
+    make_test_adapter, tmp_path, monkeypatch,
+):
+    TestRunner = make_test_adapter()
+    default_dataset_file = str(tmp_path / "dataset.json")
+
+    async def fail_list_tasks(self, dataset: str):
+        raise AssertionError(f"unexpected service task fetch for {dataset}")
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        fail_list_tasks,
+    )
+
+    cli = make_cli(
+        TestRunner,
+        default_dataset_file=default_dataset_file,
+        default_results_dir=str(tmp_path),
+    )
+    result = CliRunner().invoke(cli, [
+        "run", "--model", "m", "--run-id", "r",
+        "--dataset-name", "validation",
+        "--dataset-file", default_dataset_file,
+    ])
+
+    assert result.exit_code != 0
+    assert "mutually exclusive" in result.output.lower()
+
+
 def test_run_rejects_problem_and_dataset_name(make_test_adapter, tmp_path):
     """--problem (single-task Valkyrie mode) and --dataset-name (service-loading)
     are conceptually different sources of task content and must not be combined."""

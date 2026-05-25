@@ -51,7 +51,7 @@ def make_cli(
     @click.option("--skip-eval", is_flag=True, help="Generate only, skip evaluation")
     @click.option("--problem", "problem_path", default=None,
                   help="Path to a problem-statement file")
-    @click.option("--dataset-file", default=default_dataset_file)
+    @click.option("--dataset-file", default=None)
     @click.option("--dataset-name", default=None,
                   help="Fetch task list from the service via GET /v1/datasets/{name}/tasks. "
                        "Mutually exclusive with --dataset-file.")
@@ -88,11 +88,12 @@ def make_cli(
             raise click.UsageError("--disable-streaming requires --chat-completions")
         if problem_path and len(task_ids) != 1:
             raise click.UsageError("--problem requires exactly one TASK_ID")
-        if dataset_name and dataset_file and dataset_file != default_dataset_file:
+        if dataset_name and dataset_file is not None:
             raise click.UsageError("--dataset-name and --dataset-file are mutually exclusive")
         if problem_path and dataset_name:
             raise click.UsageError("--problem and --dataset-name are mutually exclusive")
 
+        dataset_file_resolved = dataset_file if dataset_file is not None else default_dataset_file
         custom_endpoint = custom_endpoint or os.environ.get("CUSTOM_ENDPOINT")
         custom_api_key = custom_api_key or os.environ.get("CUSTOM_API_KEY")
         service_url_resolved = service_url or os.environ.get("SERVICE_URL", "")
@@ -108,7 +109,7 @@ def make_cli(
             runner_cls=runner_cls,
             model=model, run_id=run_id, task_ids=list(task_ids),
             skip_eval=skip_eval, problem_path=problem_path,
-            dataset_file=dataset_file, dataset_name=dataset_name,
+            dataset_file=dataset_file_resolved, dataset_name=dataset_name,
             results_dir=results_dir,
             service_url=service_url_resolved, parallelism=parallelism,
             default_timeout=task_timeout,
