@@ -64,6 +64,32 @@ class MyTask(Task):
 
 The framework only ever touches the base `Task` fields, so subclass-specific data flows freely through `load_tasks` → `generate`.
 
+## Service-loaded datasets
+
+By default a runner reads tasks from its bundled JSON file (the `default_dataset_file` argument to `make_cli`). When the benchmark service supports the `/v1/datasets/{name}/tasks` endpoint and the deploy has overridden `BenchmarkService.list_tasks`, runners can fetch the task list at runtime instead. The same tenant/dataset allowlist that gates `/v1/evaluate` and `/v1/score` gates the dataset list, so granting a customer access to a sample is a one-line YAML change in `benchmark-services-registry/allowlist.yaml` rather than a custom image build.
+
+```bash
+<benchmark>-runner run \
+  --model M --run-id R \
+  --service-url https://<svc>.benchmarks.vals.ai \
+  --dataset-name validation
+```
+
+Auth: Descope only — the runner forwards `VALS_AUTH_KEY` as `x-descope-api-key`. Legacy bearer auth (`BENCHMARK_API_KEY`) is rejected by `/v1/*` with 403, so service-loading requires the deploy to have Descope configured.
+
+`--dataset-name` and `--dataset-file` are mutually exclusive. The existing `--problem <file>` Valkyrie path is unaffected (it never touches the dataset API). If the benchmark service hasn't implemented `list_tasks`, the runner gets a 501 from the endpoint and the run fails with a clear error.
+
+If service-loaded tasks expose benchmark-specific fields, set `TASK_MODEL` on the runner so the framework validates those fields after fetching them:
+
+```python
+class SWEBenchTask(Task):
+    repo: str
+    base_commit: str
+
+class SWEBenchRunner(BenchmarkRunner):
+    TASK_MODEL = SWEBenchTask
+```
+
 ## Development
 
 ```bash

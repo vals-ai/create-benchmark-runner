@@ -4,7 +4,7 @@ import asyncio
 import os
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from model_library.base import LLMConfig
 
@@ -25,6 +25,7 @@ class BenchmarkRunner(ABC):
     PAYLOAD_TYPE: str = "text"
     PAYLOAD_SCHEMA_VERSION: int = 1
     GENERATION_VERSION_ENV: str
+    TASK_MODEL: ClassVar[type[Task]] = Task
 
     def __init__(
         self,
@@ -84,6 +85,18 @@ class BenchmarkRunner(ABC):
             final_score=float(payload.get("final_score", 0.0)),
             metadata=payload.get("metadata", {}),
         )
+
+    async def load_tasks_from_service(self, dataset_name: str) -> list[Task]:
+        """Fetch tasks for `dataset_name` via the service's /v1/ surface.
+
+        Concrete framework method — adapters do not override. Stamps
+        `self._dataset = dataset_name` so default `evaluate` / `score`
+        forward it to the service alongside per-task calls.
+        """
+        response = await self._client.list_tasks(dataset=dataset_name)
+        self._dataset = dataset_name
+        # Preserve adapter-specific validation for benchmark-defined task fields.
+        return [self.TASK_MODEL.model_validate(t.model_dump()) for t in response.tasks]
 
     async def _fetch_task(self, task_id: str) -> Task:
         raise NotImplementedError(
