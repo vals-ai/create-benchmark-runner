@@ -493,6 +493,50 @@ def test_run_resume_file_task_source_does_not_infer_service_loading(
     assert (tmp_path / "r" / "t2" / "generation.json").exists()
 
 
+def test_run_failure_summary_surfaces_and_groups_error_reasons(tmp_path, monkeypatch):
+    """When generation fails, the run summary surfaces the error reason grouped by
+    identical message, instead of just listing task IDs with no explanation."""
+    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
+
+    class FailingRunner(BenchmarkRunner):
+        NAME = "failing"
+        GENERATION_VERSION_ENV = "FAILING_GENERATION_VERSION"
+
+        def load_tasks(self, dataset_file: str | None) -> list[Task]:
+            return [Task(id="t1", question="q1"), Task(id="t2", question="q2")]
+
+        async def generate(self, task, model, llm_config=None, log_dir=None) -> GenerationResult:
+            return GenerationResult(
+                task_id=task.id,
+                status=GenerationStatus.ERROR,
+                data="",
+                question=task.question,
+                model=model,
+                error="Model m not found in registry",
+            )
+
+    cli = make_cli(FailingRunner)
+
+    with patch("benchmark_runner.base.build_client") as builder:
+        builder.return_value = AsyncMock()
+
+        result = CliRunner().invoke(cli, [
+            "run", "--model", "m", "--run-id", "r1",
+            "--results-dir", str(tmp_path),
+            "--service-url", "http://svc",
+            "--skip-eval",
+        ])
+
+    assert result.exit_code != 0
+    # The actual reason is surfaced, not just the task IDs.
+    assert "Model m not found in registry" in result.output
+    # Both failing tasks are still named.
+    assert "t1" in result.output and "t2" in result.output
+    # Identical errors are grouped: the shared message is printed once, not per-task.
+    assert result.output.count("Model m not found in registry") == 1
+
+
 def test_run_resume_legacy_config_does_not_infer_service_loading(
     make_test_adapter, tmp_path, monkeypatch,
 ):

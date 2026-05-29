@@ -246,7 +246,8 @@ async def _run_impl(
     pbar.close()
 
     failed = [
-        tid for tid in process_ids
+        (tid, g.error or "unknown error")
+        for tid in process_ids
         if (g := artifacts.load_generation(tid)) and g.status == GenerationStatus.ERROR
     ]
 
@@ -289,7 +290,13 @@ async def _run_impl(
                 raise click.ClickException(f"Auto-score failed: {e}") from e
 
     if failed:
-        click.echo(f"Generation failed for: {', '.join(failed)}", err=True)
+        by_error: dict[str, list[str]] = {}
+        for tid, error in failed:
+            by_error.setdefault(error, []).append(tid)
+        click.echo(f"Generation failed for {len(failed)} task(s):", err=True)
+        for error, tids in by_error.items():
+            click.echo(f"  [{len(tids)}x] {error}", err=True)
+            click.echo(f"       {', '.join(tids)}", err=True)
         raise SystemExit(1)
 
 
