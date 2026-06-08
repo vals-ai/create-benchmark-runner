@@ -11,12 +11,13 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0.0",
     "tqdm>=4.67.1",
-    "create-benchmark-service @ git+https://github.com/vals-ai/create-benchmark-service.git@v0.5.0",
+    "create-benchmark-service @ git+https://github.com/vals-ai/create-benchmark-service.git@main",
     "model-library>=0.1.25",
 ]
 
 [project.scripts]
 create-benchmark-runner = "benchmark_runner.scaffolder.main:main"
+benchmark-sandbox = "benchmark_runner.sandbox.cli:cli"
 
 [build-system]
 requires = ["hatchling"]
