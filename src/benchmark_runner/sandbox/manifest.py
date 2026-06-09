@@ -16,6 +16,7 @@ from benchmark_service.sandbox import ImageSource, SnapshotSource
 from benchmark_service.schemas import RetrieveTaskResponse, VersionResponse
 
 from benchmark_runner.sandbox.contract import AgentContract
+from benchmark_runner.sandbox.orchestrator import _normalize_source
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,11 @@ def _registry_ref(source: ImageSource | SnapshotSource) -> str:
     emitted into an unusable manifest. Once the image-publishing workstream
     lands and retrieve_task returns a registry digest, this passes through.
     """
+    # Legacy services return docker_image="snapshot:<name>", which cbs auto-wraps
+    # into an ImageSource — normalize first so a snapshot masquerading as an image
+    # ref is refused instead of emitted into an unrunnable manifest (found live:
+    # production legal-research emitted agent.image "snapshot:...-run-14").
+    source = _normalize_source(source)
     if isinstance(source, ImageSource):
         return source.image
     raise ValueError(

@@ -200,6 +200,34 @@ async def test_snapshot_source_raises(tmp_path: Path) -> None:
             )
 
 
+@pytest.mark.asyncio
+async def test_legacy_snapshot_prefixed_image_source_raises(tmp_path: Path) -> None:
+    """Legacy services return docker_image="snapshot:<name>", which cbs auto-wraps
+    into an ImageSource — the generator must refuse it like a real SnapshotSource
+    instead of emitting agent.image "snapshot:..." (found live against production
+    legal-research, which emitted snapshot:...-run-14 as a pullable ref)."""
+    legacy = RetrieveTaskResponse.model_validate({
+        "docker_image": "snapshot:legal-research-runner-pkg-962a5e8-run-14",
+        "cwd": "/workspace",
+        "problem_path": "/workspace/problem.txt",
+        "agent_timeout": 60,
+        "resources": {"vcpu": 2, "memory": 4, "disk": 10},
+    })
+    assert isinstance(legacy.source, ImageSource)  # the cbs auto-wrap this guards against
+    client = FakeClient({"task-1": legacy})
+    contract_path = _make_contract(tmp_path)
+
+    with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
+        with pytest.raises(ValueError, match="Daytona snapshot"):
+            await generate_manifest(
+                client=client,
+                service_url="http://svc",
+                dataset="my-dataset",
+                contract_path=contract_path,
+                benchmark="mybench",
+            )
+
+
 def test_cli_manifest_fails_on_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """CLI exits non-zero with a clear error when the source is a Daytona snapshot, and writes no file."""
     source = SnapshotSource(snapshot="snap-abc123")
