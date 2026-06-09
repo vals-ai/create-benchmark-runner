@@ -7,10 +7,49 @@ from pathlib import Path
 import pytest
 
 from benchmark_service.sandbox import SandboxCreateRequest
+from benchmark_service.sandbox.types import ImageSource, SnapshotSource
 from tests.sandbox.conftest import FakeClient, FakeProvider
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_sandbox
+from benchmark_runner.sandbox.contract import AgentContract
+from benchmark_runner.sandbox.orchestrator import _normalize_source, _resolve_secret_env
 from benchmark_runner.schemas import EvalStatus, GenerationResult, GenerationStatus, ScoreResult
+
+
+def test_normalize_source_converts_legacy_snapshot_prefix() -> None:
+    """A legacy `docker_image="snapshot:NAME"` (wrapped as ImageSource by cbs) must
+    become a SnapshotSource, else Daytona tries to pull "snapshot:NAME" as an image."""
+    out = _normalize_source(ImageSource(image="snapshot:legal-research-runner-pkg-962a5e8-run-14"))
+    assert isinstance(out, SnapshotSource)
+    assert out.snapshot == "legal-research-runner-pkg-962a5e8-run-14"
+
+
+def test_normalize_source_passes_through_real_image() -> None:
+    out = _normalize_source(ImageSource(image="ghcr.io/vals-ai/x@sha256:abc"))
+    assert isinstance(out, ImageSource)
+    assert out.image == "ghcr.io/vals-ai/x@sha256:abc"
+
+
+def test_normalize_source_rejects_empty_snapshot_name() -> None:
+    with pytest.raises(ValueError, match="snapshot name"):
+        _normalize_source(ImageSource(image="snapshot:"))
+
+
+def test_resolve_secret_env_injects_only_declared_and_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only contract-declared secrets that exist in the env are injected; undeclared
+    env (e.g. VALS_AUTH_KEY) never leaks into the sandbox, and absent ones are skipped."""
+    monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
+    monkeypatch.setenv("VALS_AUTH_KEY", "should-not-leak")
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    contract = AgentContract(
+        name="x",
+        run_cmd="a --problem {problem_statement_path}",
+        secrets={"GOOGLE_API_KEY": "ref1", "TAVILY_API_KEY": "ref2"},
+    )
+    env = _resolve_secret_env(contract)
+    assert env == {"GOOGLE_API_KEY": "g-key"}  # present+declared only
+    assert "VALS_AUTH_KEY" not in env  # undeclared env not leaked
+    assert "TAVILY_API_KEY" not in env  # declared but absent → skipped, not empty
 
 
 @pytest.mark.asyncio

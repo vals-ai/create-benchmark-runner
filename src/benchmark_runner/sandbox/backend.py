@@ -26,6 +26,15 @@ class SandboxLike(Protocol):
     async def download_file(self, remote_path: str) -> bytes: ...
 
 
+def _format_exc(exc: BaseException) -> str:
+    """Render an exception as 'TypeName: message', keeping the type when the
+    message is empty. Some exceptions (notably httpx.ReadTimeout) stringify to
+    '', so a bare str(exc) saves a useless blank error; the type name is the
+    signal that makes a timeout/connection failure legible in the artifact."""
+    message = str(exc)
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def _error_result(*, task_id: str, model: str, error: str) -> GenerationResult:
     return GenerationResult(
         task_id=task_id,
@@ -60,6 +69,12 @@ class SandboxGenerationBackend:
         log_dir: Path,
     ) -> GenerationResult:
         try:
+            # Step 0: ensure cwd exists before any `cd` into it.
+            # The benchmark service may return a cwd that the image does not
+            # pre-create (e.g. legal-research returns /workspace on an image with
+            # WORKDIR /app); Valkyrie's tracker mkdir -p's it first, so mirror that.
+            await sandbox.exec(f"mkdir -p {shlex.quote(cwd)}")
+
             # Step 1: optional install
             # Shell-prefix the install with a timeout so a hung install doesn't block forever.
             # Do NOT pass timeout= to sandbox.exec — cbs prefixes it as a shell command which
@@ -91,26 +106,41 @@ class SandboxGenerationBackend:
                     error="contract.final_output is not set; no generation file to read",
                 )
 
-            # Step 4: check exit code before attempting download
-            # Exit code 124 = shell timeout fired → classify as MAX_TIME, not ERROR.
+            # Step 4: shell-level timeout → the process was killed before it could
+            # write a result file, so don't attempt a download.
+            # Exit code 124 = `timeout` fired → MAX_TIME, not ERROR.
             if result.exit_code == 124:
+                timeout_note = f" after {int(agent_timeout)}s" if agent_timeout else ""
                 return _max_time_result(
                     task_id=task_id,
                     model=model,
-                    error=f"agent timed out after {agent_timeout}s (exit 124)",
-                )
-            if result.exit_code != 0:
-                return _error_result(
-                    task_id=task_id,
-                    model=model,
-                    error=result.output[:4096],
+                    error=f"agent timed out{timeout_note} (exit 124)",
                 )
 
-            # Step 5: download and parse
+            # Step 5: download and parse the agent's generation.json.
+            # Attempt this even on a nonzero exit: the runner writes a structured
+            # GenerationResult (status + a real `error`) on its own failures, which
+            # is far more useful than raw stdout. Only fall back to stdout when the
+            # file is genuinely absent (the agent never got far enough to write it).
             output_path = f"{contract.final_output.rstrip('/')}/{task_id}/generation.json"
             log_dir = Path(log_dir)
             log_dir.mkdir(parents=True, exist_ok=True)
-            content = await sandbox.download_file(output_path)
+            try:
+                content = await sandbox.download_file(output_path)
+            except Exception as download_exc:
+                # No result file → surface the run's exit code + captured stdout.
+                if result.exit_code != 0:
+                    return _error_result(
+                        task_id=task_id,
+                        model=model,
+                        error=f"agent exited {result.exit_code}, no generation file: {result.output[:4096]}",
+                    )
+                return _error_result(
+                    task_id=task_id,
+                    model=model,
+                    error=f"could not read generation file {output_path}: {download_exc}",
+                )
+
             (log_dir / "generation_raw.json").write_bytes(content)
             parsed = GenerationResult.model_validate(json.loads(content))
 
@@ -122,6 +152,6 @@ class SandboxGenerationBackend:
             return parsed
         except TimeoutError as exc:
             # SDK-level timeout (asyncio.TimeoutError is an alias for TimeoutError on 3.11+)
-            return _max_time_result(task_id=task_id, model=model, error=str(exc))
+            return _max_time_result(task_id=task_id, model=model, error=_format_exc(exc))
         except Exception as exc:
-            return _error_result(task_id=task_id, model=model, error=str(exc))
+            return _error_result(task_id=task_id, model=model, error=_format_exc(exc))

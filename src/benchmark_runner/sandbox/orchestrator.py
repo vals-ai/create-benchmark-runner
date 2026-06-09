@@ -2,15 +2,17 @@
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 from benchmark_service.client import BenchmarkServiceClient
 from benchmark_service.sandbox import SandboxCreateRequest, SandboxProvider
+from benchmark_service.sandbox.types import ImageSource, SandboxSource, SnapshotSource
 
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
-from benchmark_runner.sandbox.backend import SandboxGenerationBackend
+from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
 from benchmark_runner.sandbox.contract import AgentContract, format_run_cmd
 from benchmark_runner.schemas import (
     EvalResult,
@@ -22,6 +24,51 @@ from benchmark_runner.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Legacy benchmark services (e.g. legal-research on framework 0.6.1) return the
+# sandbox source as the string field `docker_image="snapshot:<name>"`. cbs's
+# RetrieveTaskResponse.parse_legacy_fields blindly wraps that into an ImageSource,
+# so the "snapshot:" prefix survives as a bogus image ref that Daytona would try
+# to PULL. Valkyrie's tracker special-cases this prefix; mirror that here so the
+# orchestrator boots snapshot-based benchmarks instead of failing on an image pull.
+_SNAPSHOT_IMAGE_PREFIX = "snapshot:"
+
+
+def _normalize_source(source: SandboxSource) -> SandboxSource:
+    """Reinterpret an ImageSource carrying the legacy ``snapshot:`` prefix as a SnapshotSource."""
+    if isinstance(source, ImageSource) and source.image.startswith(_SNAPSHOT_IMAGE_PREFIX):
+        snapshot_name = source.image[len(_SNAPSHOT_IMAGE_PREFIX):].strip()
+        if not snapshot_name:
+            raise ValueError(f"snapshot-based source has no snapshot name: {source.image!r}")
+        return SnapshotSource(snapshot=snapshot_name)
+    return source
+
+
+def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
+    """Resolve the contract's declared secret env-var names from the orchestrator's
+    own environment, injecting only those the agent needs into the sandbox.
+
+    Production (Valkyrie) resolves the contract's `secrets:` map from a secret
+    manager; the pilot passes them through the orchestrator env instead. Keying
+    on the contract means unrelated orchestrator env (SERVICE_URL, VALS_AUTH_KEY,
+    Daytona creds) never leaks into the agent sandbox. Names absent from the env
+    are skipped (and logged) rather than injected empty.
+    """
+    env: dict[str, str] = {}
+    missing: list[str] = []
+    for var_name in contract.secrets:
+        value = os.environ.get(var_name)
+        if value:
+            env[var_name] = value
+        else:
+            missing.append(var_name)
+    if missing:
+        logger.warning(
+            "contract declares %d secret(s) not in the orchestrator env (skipped): %s",
+            len(missing),
+            ", ".join(sorted(missing)),
+        )
+    return env
 
 # Sandbox lifecycle constants
 # auto_stop_interval is in minutes (Daytona SDK); 30 min ensures an undeleted sandbox
@@ -41,10 +88,19 @@ async def run_sandbox(
     client: BenchmarkServiceClient,
     provider: SandboxProvider | None = None,
     parallelism: int = 10,
+    source_override: SandboxSource | None = None,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
     Handles resume: skips generation/eval if valid artifacts already exist.
+
+    source_override: when set, boot every sandbox from this source instead of the
+    one retrieve_task returns. Eval is text-based (the generation string is sent to
+    the service judge, not the sandbox), so this lets you point generation at a
+    different/known-good agent image while still using the service's real dataset
+    and rubric eval — e.g. to validate a candidate snapshot before repointing the
+    deployed service. The retrieve_task source's `snapshot:` prefix is still honored
+    for the default path.
     """
     if parallelism < 1:
         raise ValueError(f"parallelism must be >= 1, got {parallelism}")
@@ -54,6 +110,9 @@ async def run_sandbox(
 
     contract = AgentContract.from_yaml(Path(contract_path))
     contract = contract.model_copy(update={"run_cmd": format_run_cmd(contract.run_cmd, {"model": model})})
+    # Resolve the contract's declared secrets once (constant across tasks) and
+    # inject them into every sandbox so the agent can reach its model/tools.
+    secret_env = _resolve_secret_env(contract)
 
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     backend = SandboxGenerationBackend()
@@ -72,11 +131,11 @@ async def run_sandbox(
         try:
             td = await client.retrieve_task(task_id=tid, dataset=dataset)
             req = SandboxCreateRequest(
-                source=td.source,
+                source=source_override if source_override is not None else _normalize_source(td.source),
                 resources=td.resources,
                 name=f"{run_id}-{tid}",
                 labels={},
-                env_vars={},
+                env_vars=secret_env,
                 auto_stop_interval=SANDBOX_AUTO_STOP_INTERVAL,
                 create_timeout=SANDBOX_CREATE_TIMEOUT,
             )
@@ -139,7 +198,7 @@ async def run_sandbox(
                 data = EvalResultData.model_validate(raw) if raw is not None else None
                 ev = EvalResult(task_id=tid, status=EvalStatus.EVALUATED, result=data)
             except Exception as exc:
-                ev = EvalResult(task_id=tid, status=EvalStatus.ERROR, error=str(exc))
+                ev = EvalResult(task_id=tid, status=EvalStatus.ERROR, error=_format_exc(exc))
 
         artifacts.save_eval(tid, ev)
 

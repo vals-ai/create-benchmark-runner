@@ -3,9 +3,20 @@
 import json
 from pathlib import Path
 
-from benchmark_runner.sandbox.backend import SandboxGenerationBackend
+from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.schemas import GenerationStatus
+
+
+def test_format_exc_keeps_type_when_message_blank() -> None:
+    """An empty-message exception (e.g. httpx.ReadTimeout('')) must still record its
+    type — a bare str() would save a useless empty error string."""
+
+    class ReadTimeout(Exception):
+        pass
+
+    assert _format_exc(ReadTimeout("")) == "ReadTimeout"
+    assert _format_exc(ReadTimeout("boom")) == "ReadTimeout: boom"
 
 
 class FakeExecResult:
@@ -85,9 +96,12 @@ async def test_success_path(tmp_path: Path) -> None:
         log_dir=tmp_path,
     )
 
-    # Two commands: install + run
-    assert len(sandbox.commands) == 2
-    install_cmd, run_cmd = sandbox.commands
+    # Three commands: mkdir cwd + install + run
+    assert len(sandbox.commands) == 3
+    mkdir_cmd, install_cmd, run_cmd = sandbox.commands
+
+    # cwd is created before anything cd's into it
+    assert mkdir_cmd.startswith("mkdir -p ")
 
     # Install command contains the install_cmd
     assert "bash setup.sh" in install_cmd
@@ -138,6 +152,35 @@ async def test_nonzero_exit_returns_error(tmp_path: Path) -> None:
     assert result.status == GenerationStatus.ERROR
     assert result.task_id == "task-2"
     assert exec_output in (result.error or "")
+
+
+async def test_nonzero_exit_with_generation_file_parses_it(tmp_path: Path) -> None:
+    """Nonzero exit BUT the agent wrote a structured generation.json → parse it
+    (the agent's own status/error is richer than raw stdout)."""
+    raw = json.dumps({
+        "task_id": "task-2",
+        "status": "error",
+        "data": "",
+        "model": "openai/gpt-5",
+        "error": "agent-reported: tool call failed",
+    }).encode()
+    sandbox = FakeSandbox(exec_exit_code=1, exec_output="noisy stdout", download_bytes=raw)
+    backend = SandboxGenerationBackend()
+    contract = _make_contract(with_install=False)
+
+    result = await backend.generate(
+        sandbox=sandbox,
+        contract=contract,
+        task_id="task-2",
+        model="openai/gpt-5",
+        problem_path="/problems/task-2.json",
+        cwd="/app",
+        agent_timeout=None,
+        log_dir=tmp_path,
+    )
+
+    assert result.status == GenerationStatus.ERROR
+    assert result.error == "agent-reported: tool call failed"  # the agent's error, not stdout
 
 
 async def test_missing_output_file_returns_error(tmp_path: Path) -> None:
