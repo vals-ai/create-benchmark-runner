@@ -7,7 +7,55 @@ import pytest
 
 from benchmark_service.sandbox import ImageSource, Resources, SandboxCreateRequest
 from benchmark_service.schemas import FinalScoreResponse, RetrieveTaskResponse, SetupTaskResponse
+from benchmark_runner.sandbox.manifest import (
+    AgentSpec,
+    ContractSpec,
+    DatasetSpec,
+    EvalSpec,
+    Manifest,
+    ServiceSpec,
+    TaskEntry,
+    VersionsSpec,
+)
 from benchmark_runner.schemas import GenerationStatus
+
+
+def make_manifest(
+    name: str = "mybench",
+    *,
+    image: str = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64,
+    dataset_version: str | None = None,
+    benchmark_service_version: str | None = "0.6.1",
+) -> Manifest:
+    """Minimal valid manifest for store/CLI tests: two tasks, shared image, one secret."""
+    return Manifest(
+        benchmark=name,
+        service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version="0.6.1"),
+        dataset=DatasetSpec(name=f"{name}-dataset", version=dataset_version),
+        agent=AgentSpec(
+            image=image,
+            resources={"vcpu": 2, "memory": 4, "disk": 10},
+            cwd="/app",
+            contract=ContractSpec(
+                install_cmd=None,
+                run_cmd="agent run --model {model} --problem {problem_statement_path}",
+                final_output="/app/results",
+                secrets={"GOOGLE_API_KEY": "projects/x/google"},
+            ),
+        ),
+        eval=EvalSpec(
+            evaluate_endpoint="/evaluate-response/",
+            score_endpoint="/final-score/",
+            payload_schema=f"{name}.text.v1",
+        ),
+        tasks=[
+            TaskEntry(id="task-1", question="Q1", timeout=60.0),
+            TaskEntry(id="task-2", question="Q2", timeout=60.0),
+        ],
+        versions=VersionsSpec(
+            benchmark_service=benchmark_service_version, eval=None, dataset=None, image=None
+        ),
+    )
 
 
 class FakeExecResult:

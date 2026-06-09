@@ -28,6 +28,11 @@ class ContractSpec(BaseModel):
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
+    # Declared secret env-var names the agent needs at runtime (same shape as
+    # AgentContract.secrets). The orchestrator's _resolve_secret_env injects only
+    # these into the sandbox, so a manifest without them would run agents with no
+    # model/tool credentials. Defaulted for manifests generated before this field.
+    secrets: dict[str, str] = {}
 
 
 class AgentSpec(BaseModel):
@@ -271,7 +276,12 @@ async def generate_manifest(
 
 def _contract_spec(contract_path: Path) -> ContractSpec:
     c = AgentContract.from_yaml(contract_path)
-    return ContractSpec(install_cmd=c.install_cmd, run_cmd=c.run_cmd, final_output=c.final_output)
+    return ContractSpec(
+        install_cmd=c.install_cmd,
+        run_cmd=c.run_cmd,
+        final_output=c.final_output,
+        secrets=c.secrets,
+    )
 
 
 __all__ = ["Manifest", "generate_manifest", "_fetch_version"]

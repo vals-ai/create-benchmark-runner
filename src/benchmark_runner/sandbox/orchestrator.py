@@ -76,7 +76,8 @@ async def run_benchmark(
     task_ids: list[str],
     dataset: str | None,
     results_dir: str,
-    contract_path: Path | str,
+    contract_path: Path | str | None = None,
+    contract: AgentContract | None = None,
     client: BenchmarkServiceClientLike,
     provider: SandboxProviderLike | None = None,
     parallelism: int = 10,
@@ -85,6 +86,10 @@ async def run_benchmark(
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
     Handles resume: skips generation/eval if valid artifacts already exist.
+
+    Exactly one of `contract_path` (load contract.yaml from disk) or `contract`
+    (an in-memory AgentContract, e.g. built from an installed manifest's
+    ContractSpec) must be provided.
 
     source_override: when set, boot every sandbox from this image instead of the
     one retrieve_task returns. Eval is text-based (the generation string is sent to
@@ -96,10 +101,16 @@ async def run_benchmark(
     if parallelism < 1:
         raise ValueError(f"parallelism must be >= 1, got {parallelism}")
 
+    if contract_path is not None:
+        if contract is not None:
+            raise ValueError("provide exactly one of contract or contract_path, not both")
+        contract = AgentContract.from_yaml(Path(contract_path))
+    elif contract is None:
+        raise ValueError("provide exactly one of contract or contract_path")
+
     if provider is None:
         provider = client.get_sandbox_provider()
 
-    contract = AgentContract.from_yaml(Path(contract_path))
     # Without final_output there is no result file to read; fail before booting sandboxes.
     if contract.final_output is None:
         raise ValueError("contract.final_output is not set; no generation file to read")

@@ -52,6 +52,50 @@ def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_run_benchmark_contract_param(tmp_path: Path, contract_yaml: Path) -> None:
+    """An in-memory contract (manifest mode) runs without a contract.yaml on disk;
+    exactly one of contract / contract_path must be provided."""
+    contract = AgentContract.from_yaml(contract_yaml)
+
+    with pytest.raises(ValueError, match="exactly one"):
+        await run_benchmark(
+            run_id="run-mem",
+            model="openai/gpt-5",
+            task_ids=["task-a"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            client=FakeClient(),
+            provider=FakeProvider(),
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        await run_benchmark(
+            run_id="run-mem",
+            model="openai/gpt-5",
+            task_ids=["task-a"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            contract=contract,
+            contract_path=contract_yaml,
+            client=FakeClient(),
+            provider=FakeProvider(),
+        )
+
+    await run_benchmark(
+        run_id="run-mem",
+        model="openai/gpt-5",
+        task_ids=["task-a"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract=contract,
+        client=FakeClient(),
+        provider=FakeProvider(),
+    )
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="run-mem")
+    gen = artifacts.load_generation("task-a")
+    assert gen is not None and gen.status == GenerationStatus.SUCCESS
+
+
+@pytest.mark.asyncio
 async def test_run_benchmark_produces_artifacts_and_score(
     tmp_path: Path,
     contract_yaml: Path,

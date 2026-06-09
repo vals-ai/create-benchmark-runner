@@ -26,6 +26,8 @@ def _make_contract(tmp_path: Path) -> Path:
         "install_cmd: pip install -e .\n"
         "run_cmd: agent run --problem {problem_statement_path}\n"
         "final_output: /app/results\n"
+        "secrets:\n"
+        "  GOOGLE_API_KEY: projects/x/google\n"
     )
     return p
 
@@ -145,10 +147,11 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
     assert manifest.agent.resources is not None
     assert manifest.agent.cwd == "/app"
 
-    # Contract fields
+    # Contract fields (incl. declared secrets — the orchestrator injects only these)
     assert manifest.agent.contract.install_cmd == "pip install -e ."
     assert manifest.agent.contract.final_output == "/app/results"
     assert "{problem_statement_path}" in manifest.agent.contract.run_cmd
+    assert manifest.agent.contract.secrets == {"GOOGLE_API_KEY": "projects/x/google"}
 
     # Eval block
     assert manifest.eval.evaluate_endpoint == "/evaluate-response/"
