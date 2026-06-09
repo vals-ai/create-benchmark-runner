@@ -1,5 +1,6 @@
 """Behavioral tests for run_sandbox orchestrator loop (TDD)."""
 
+import asyncio
 import json
 import stat
 from pathlib import Path
@@ -8,7 +9,7 @@ import pytest
 
 from benchmark_service.sandbox import SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SnapshotSource
-from tests.sandbox.conftest import FakeClient, FakeProvider
+from tests.sandbox.conftest import FakeClient, FakeProvider, FakeSandbox
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_sandbox
 from benchmark_runner.sandbox.contract import AgentContract
@@ -132,6 +133,58 @@ async def test_run_sandbox_resume_skips_sandboxes(
     )
 
     assert second_provider.created == [], "resume should not create any new sandboxes"
+
+
+@pytest.mark.asyncio
+async def test_eval_runs_outside_sandbox_semaphore(
+    tmp_path: Path,
+    contract_yaml: Path,
+) -> None:
+    """The semaphore bounds sandbox concurrency only (mirrors cli.py's gen_sem):
+    with parallelism=1, the second task's generation must be able to start while
+    the first task's eval is still in flight."""
+    second_sandbox_created = asyncio.Event()
+
+    class SignalingProvider(FakeProvider):
+        async def create_sandbox(self, request: SandboxCreateRequest) -> FakeSandbox:
+            sandbox = await super().create_sandbox(request)
+            if len(self.created) >= 2:
+                second_sandbox_created.set()
+            return sandbox
+
+    class GatedEvalClient(FakeClient):
+        async def evaluate_response(
+            self,
+            task_id: str,
+            response: str,
+            dataset: str | None = None,
+        ) -> dict[str, object]:
+            # Block eval until the second sandbox exists. If eval held the
+            # (size-1) semaphore, the second generation could never start and
+            # this wait would time out, surfacing as an ERROR eval below.
+            await asyncio.wait_for(second_sandbox_created.wait(), timeout=5)
+            return await super().evaluate_response(task_id, response, dataset=dataset)
+
+    client = GatedEvalClient()
+    provider = SignalingProvider()
+
+    await run_sandbox(
+        run_id="run-sem",
+        model="openai/gpt-5",
+        task_ids=["task-a", "task-b"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=client,
+        provider=provider,
+        parallelism=1,
+    )
+
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="run-sem")
+    for tid in ("task-a", "task-b"):
+        ev = artifacts.load_eval(tid)
+        assert ev is not None
+        assert ev.status == EvalStatus.EVALUATED, f"{tid}: {ev.status} ({ev.error})"
 
 
 @pytest.mark.asyncio

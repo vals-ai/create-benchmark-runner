@@ -80,9 +80,20 @@ class SandboxGenerationBackend:
             # Do NOT pass timeout= to sandbox.exec — cbs prefixes it as a shell command which
             # would break the `cd && ...` chain.
             if contract.install_cmd:
-                await sandbox.exec(
+                install_result = await sandbox.exec(
                     f"cd {shlex.quote(cwd)} && timeout {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
                 )
+                if install_result.exit_code != 0:
+                    # A broken install means the agent would fail with a confusing
+                    # downstream error (ModuleNotFoundError etc.); fail fast instead.
+                    return _error_result(
+                        task_id=task_id,
+                        model=model,
+                        error=(
+                            f"install failed (exit {install_result.exit_code}): "
+                            f"{install_result.output[:4096]}"
+                        ),
+                    )
 
             # Step 2: build and run the agent command
             # Use `timeout -k 10` so a process ignoring SIGTERM is killed 10s later by SIGKILL.

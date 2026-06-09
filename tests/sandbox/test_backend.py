@@ -131,6 +131,30 @@ async def test_success_path(tmp_path: Path) -> None:
     assert result.task_id == "task-1"
 
 
+async def test_install_failure_returns_error_without_running_agent(tmp_path: Path) -> None:
+    """Nonzero install exit → ERROR naming the install step; the agent never runs."""
+    sandbox = FakeSandbox(exec_exit_code=1, exec_output="pip: no matching distribution")
+    backend = SandboxGenerationBackend()
+    contract = _make_contract(with_install=True)
+
+    result = await backend.generate(
+        sandbox=sandbox,
+        contract=contract,
+        task_id="task-1",
+        model="openai/gpt-5",
+        problem_path="/problems/task-1.json",
+        cwd="/app",
+        agent_timeout=60.0,
+        log_dir=tmp_path,
+    )
+
+    assert result.status == GenerationStatus.ERROR
+    assert "install failed (exit 1)" in (result.error or "")
+    assert "pip: no matching distribution" in (result.error or "")
+    # Only mkdir + install ran; the agent command was never executed.
+    assert len(sandbox.commands) == 2
+
+
 async def test_nonzero_exit_returns_error(tmp_path: Path) -> None:
     """Non-zero exec exit code → ERROR status with exec output in error field."""
     exec_output = "agent crashed: out of memory"

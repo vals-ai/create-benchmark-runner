@@ -119,9 +119,13 @@ async def run_sandbox(
     sem = asyncio.Semaphore(parallelism)
 
     async def _run_task(tid: str) -> None:
+        # The semaphore bounds sandbox concurrency, so it gates generation only —
+        # eval is an HTTP call to the service judge (can take minutes) and holding
+        # a sandbox slot through it would throttle throughput. Mirrors cli.py,
+        # which holds gen_sem around generation only.
         async with sem:
             await _process_generation(tid)
-            await _process_eval(tid)
+        await _process_eval(tid)
 
     async def _process_generation(tid: str) -> None:
         if not is_generation_redoable(artifacts, tid):
