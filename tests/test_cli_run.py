@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from benchmark_runner import BenchmarkRunner, GenerationResult, GenerationStatus, Task
@@ -453,6 +454,61 @@ def test_run_resume_honors_service_loaded_run_config(
     assert result.exit_code == 0, result.output
     assert fetched == ["validation"]
     assert (tmp_path / "r" / "svc-t1" / "generation.json").exists()
+
+
+@pytest.mark.parametrize("pass_dataset_file", [True, False])
+def test_run_resume_service_backed_warns_on_ignored_dataset_file(
+    make_test_adapter, tmp_path, monkeypatch, pass_dataset_file,
+):
+    """An explicit --dataset-file on a service-backed resume is ignored in favor
+    of the dataset frozen in run_config.json; warn instead of staying silent."""
+    TestRunner = make_test_adapter()
+
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="r")
+    artifacts.save_run_config({
+        "run_id": "r",
+        "model": "m",
+        "tasks": ["svc-t1"],
+        "dataset_file": None,
+        "dataset_name": "validation",
+        "task_source": "service",
+        "payload_schema": "x.text.v1",
+        "payload_type": "text",
+        "runner_version": "0.0.0",
+        "generation_version": "dev",
+    })
+
+    fetched: list[str] = []
+
+    async def stub_list_tasks(self, dataset: str):
+        fetched.append(dataset)
+        return V1DatasetTasksResponse(
+            dataset=dataset,
+            tasks=[V1Task(id="svc-t1", question="from service")],
+        )
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        stub_list_tasks,
+    )
+
+    async def stub_generate(self, task, model, llm_config=None, log_dir=None):
+        return GenerationResult(
+            task_id=task.id, status=GenerationStatus.SUCCESS,
+            data="ok", question=task.question, model=model,
+        )
+    monkeypatch.setattr(TestRunner, "generate", stub_generate)
+
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    args = ["run", "--model", "m", "--run-id", "r", "--skip-eval"]
+    if pass_dataset_file:
+        args += ["--dataset-file", str(tmp_path / "custom.json")]
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert fetched == ["validation"]
+    warned = "--dataset-file ignored" in result.output
+    assert warned == pass_dataset_file, result.output
 
 
 def test_run_resume_file_task_source_does_not_infer_service_loading(

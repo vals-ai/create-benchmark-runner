@@ -154,6 +154,12 @@ async def _run_impl(
             resumed_dataset_name = existing_config.get("dataset_name")
             if not resumed_dataset_name:
                 raise click.ClickException("run_config.json has task_source=service but no dataset_name")
+            if dataset_file is not None:
+                click.echo(
+                    f"Warning: --dataset-file ignored; resuming service-backed run "
+                    f"with dataset '{resumed_dataset_name}' from run_config.json",
+                    err=True,
+                )
             dataset_name = resumed_dataset_name
         elif saved_task_source == "file" and dataset_file is None:
             # Restore the dataset file frozen in run_config so a resumed
