@@ -79,20 +79,21 @@ class SandboxGenerationBackend:
             # Shell-prefix the install with a timeout so a hung install doesn't block forever.
             # Do NOT pass timeout= to sandbox.exec — cbs prefixes it as a shell command which
             # would break the `cd && ...` chain.
+            install_error: str | None = None
             if contract.install_cmd:
                 install_result = await sandbox.exec(
                     f"cd {shlex.quote(cwd)} && timeout {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
                 )
                 if install_result.exit_code != 0:
-                    # A broken install means the agent would fail with a confusing
-                    # downstream error (ModuleNotFoundError etc.); fail fast instead.
-                    return _error_result(
-                        task_id=task_id,
-                        model=model,
-                        error=(
-                            f"install failed (exit {install_result.exit_code}): "
-                            f"{install_result.output[:4096]}"
-                        ),
+                    # Best-effort: runner-framework images bake the agent in, and the
+                    # contract's install_cmd may target Valkyrie's uploaded-bundle layout
+                    # (e.g. a setup.sh that exists only in the bundle, never in the image),
+                    # so a failed install must not block the run. Keep the context and
+                    # attach it if the run produces nothing, so a genuinely broken install
+                    # is never diagnosed from a bare downstream error.
+                    install_error = (
+                        f"install failed (exit {install_result.exit_code}): "
+                        f"{install_result.output[:1024]}"
                     )
 
             # Step 2: build and run the agent command
@@ -139,17 +140,22 @@ class SandboxGenerationBackend:
             try:
                 content = await sandbox.download_file(output_path)
             except Exception as download_exc:
-                # No result file → surface the run's exit code + captured stdout.
+                # No result file → surface the run's exit code + captured stdout,
+                # plus the install failure when there was one (both are the story).
+                install_note = f" [{install_error}]" if install_error else ""
                 if result.exit_code != 0:
                     return _error_result(
                         task_id=task_id,
                         model=model,
-                        error=f"agent exited {result.exit_code}, no generation file: {result.output[:4096]}",
+                        error=(
+                            f"agent exited {result.exit_code}, no generation file: "
+                            f"{result.output[:4096]}{install_note}"
+                        ),
                     )
                 return _error_result(
                     task_id=task_id,
                     model=model,
-                    error=f"could not read generation file {output_path}: {download_exc}",
+                    error=f"could not read generation file {output_path}: {download_exc}{install_note}",
                 )
 
             (log_dir / "generation_raw.json").write_bytes(content)

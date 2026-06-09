@@ -131,9 +131,60 @@ async def test_success_path(tmp_path: Path) -> None:
     assert result.task_id == "task-1"
 
 
-async def test_install_failure_returns_error_without_running_agent(tmp_path: Path) -> None:
-    """Nonzero install exit → ERROR naming the install step; the agent never runs."""
-    sandbox = FakeSandbox(exec_exit_code=1, exec_output="pip: no matching distribution")
+class _InstallFailsSandbox(FakeSandbox):
+    """Install command exits 127; everything else succeeds."""
+
+    async def exec(self, command: str, *, cwd: str | None = None, timeout: float | None = None) -> FakeExecResult:
+        self.commands.append(command)
+        self.timeouts.append(timeout)
+        if "bash setup.sh" in command:
+            return FakeExecResult(exit_code=127, output="bash: setup.sh: No such file or directory")
+        return FakeExecResult(exit_code=0, output="")
+
+
+async def test_install_failure_is_best_effort_run_still_succeeds(tmp_path: Path) -> None:
+    """Nonzero install exit must not block the run: runner-framework images bake the
+    agent in, and install_cmd may target Valkyrie's uploaded-bundle layout (a setup.sh
+    that exists only in the bundle, never in the image). The run proceeds and its
+    parsed result is returned untouched."""
+    raw = _make_generation_json("task-1")
+    sandbox = _InstallFailsSandbox(download_bytes=raw)
+    backend = SandboxGenerationBackend()
+    contract = _make_contract(with_install=True)
+
+    result = await backend.generate(
+        sandbox=sandbox,
+        contract=contract,
+        task_id="task-1",
+        model="openai/gpt-5",
+        problem_path="/problems/task-1.json",
+        cwd="/app",
+        agent_timeout=60.0,
+        log_dir=tmp_path,
+    )
+
+    assert result.status == GenerationStatus.SUCCESS
+    assert result.data == "my answer"
+    # mkdir + install + run — the agent DID run despite the failed install.
+    assert len(sandbox.commands) == 3
+
+
+async def test_install_failure_context_attached_when_run_produces_nothing(tmp_path: Path) -> None:
+    """If the run then yields no generation file, the install failure is part of the
+    story — both errors are surfaced, so a genuinely broken install is never diagnosed
+    from a bare downstream error."""
+
+    class _InstallAndRunFail(FakeSandbox):
+        async def exec(self, command: str, *, cwd: str | None = None, timeout: float | None = None) -> FakeExecResult:
+            self.commands.append(command)
+            self.timeouts.append(timeout)
+            if "bash setup.sh" in command:
+                return FakeExecResult(exit_code=127, output="bash: setup.sh: No such file or directory")
+            if "agent run" in command:
+                return FakeExecResult(exit_code=1, output="ModuleNotFoundError: agent")
+            return FakeExecResult(exit_code=0, output="")
+
+    sandbox = _InstallAndRunFail()  # download_file raises FileNotFoundError by default
     backend = SandboxGenerationBackend()
     contract = _make_contract(with_install=True)
 
@@ -149,10 +200,8 @@ async def test_install_failure_returns_error_without_running_agent(tmp_path: Pat
     )
 
     assert result.status == GenerationStatus.ERROR
-    assert "install failed (exit 1)" in (result.error or "")
-    assert "pip: no matching distribution" in (result.error or "")
-    # Only mkdir + install ran; the agent command was never executed.
-    assert len(sandbox.commands) == 2
+    assert "agent exited 1" in (result.error or "")
+    assert "install failed (exit 127)" in (result.error or "")
 
 
 async def test_nonzero_exit_returns_error(tmp_path: Path) -> None:
