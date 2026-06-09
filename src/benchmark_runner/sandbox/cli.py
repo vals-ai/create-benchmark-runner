@@ -5,12 +5,14 @@ import os
 from pathlib import Path
 
 import click
+import yaml
 from dotenv import load_dotenv
 
 from benchmark_service.client import BenchmarkServiceClient
 from benchmark_service.sandbox.types import ImageSource
 
 from benchmark_runner.client import auth_headers
+from benchmark_runner.sandbox.manifest import generate_manifest
 from benchmark_runner.sandbox.orchestrator import run_benchmark
 
 
@@ -78,6 +80,45 @@ def run(
             source_override=source_override,
         )
     )
+
+
+@cli.command()
+@click.option("--service-url", default=None, help="Benchmark service URL (falls back to $SERVICE_URL)")
+@click.option("--dataset", required=True, help="Dataset name")
+@click.option("--contract", required=True, help="Path to the agent contract.yaml")
+@click.option("--benchmark", required=True, help="Benchmark identifier")
+@click.option("--output", required=True, help="Output path for the manifest YAML")
+def manifest(
+    service_url: str | None,
+    dataset: str,
+    contract: str,
+    benchmark: str,
+    output: str,
+) -> None:
+    """Generate a self-contained benchmark manifest for lab-hosted consumers."""
+    service_url = service_url or os.environ.get("SERVICE_URL", "")
+    headers = auth_headers()
+    client = BenchmarkServiceClient(service_url, headers=headers)
+
+    try:
+        mf = asyncio.run(
+            generate_manifest(
+                client=client,
+                service_url=service_url,
+                dataset=dataset,
+                contract_path=Path(contract),
+                benchmark=benchmark,
+            )
+        )
+    except ValueError as exc:
+        # A non-pullable source (Daytona snapshot) or an empty dataset cannot
+        # produce a valid lab-hosted manifest; surface it cleanly (exit non-zero).
+        raise click.ClickException(str(exc)) from exc
+
+    output_path = Path(output)
+    output_path.write_text(yaml.safe_dump(mf.model_dump(), default_flow_style=False, sort_keys=False))
+
+    click.echo(f"Manifest written to {output_path} ({len(mf.tasks)} tasks, benchmark={benchmark})")
 
 
 __all__ = ["cli"]
