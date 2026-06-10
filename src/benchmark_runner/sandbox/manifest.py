@@ -43,6 +43,13 @@ class AgentSpec(BaseModel):
     image: str | None
     resources: dict[str, Any] | None
     cwd: str | None
+    # In-sandbox path where the agent expects the problem statement file.
+    # Consumed by manifest-native runs to upload the question without calling
+    # the service's setup_task (task A2/A3).
+    # Defaults to None so manifests generated before this field existed (e.g.
+    # already-delivered lab manifests like legal-research E1) still load cleanly
+    # via store.py re-validation; callers fall back to an explicit callback path.
+    problem_path: str | None = None
     contract: ContractSpec
 
 
@@ -200,6 +207,17 @@ async def generate_manifest(
     # an image but differed in resources or cwd, later tasks' requirements
     # would be silently dropped (first task's values promoted to agent block).
     first = details[0]
+
+    # problem_path is emitted agent-level in both branches (shared and per-task),
+    # so divergent per-task values can't be represented in a manifest. Reject early
+    # rather than silently dropping all but the first task's value — the same bug
+    # class the shared/resources check above was added to prevent.
+    if any(d.problem_path != first.problem_path for d in details):
+        raise ValueError(
+            "tasks have divergent problem_path values; manifests carry problem_path at the "
+            "agent level (not per-task), so all tasks must share the same problem_path"
+        )
+
     shared = all(
         d.source == first.source and d.resources == first.resources and d.cwd == first.cwd
         for d in details
@@ -211,6 +229,7 @@ async def generate_manifest(
             image=shared_ref,
             resources=first.resources.model_dump(),
             cwd=first.cwd,
+            problem_path=first.problem_path,
             contract=_contract_spec(contract_path),
         )
         # Every task entry carries its image explicitly, even when shared
@@ -228,6 +247,7 @@ async def generate_manifest(
             image=None,
             resources=None,
             cwd=None,
+            problem_path=first.problem_path,
             contract=_contract_spec(contract_path),
         )
 

@@ -36,6 +36,7 @@ def make_manifest(
             image=image,
             resources={"vcpu": 2, "memory": 4, "disk": 10},
             cwd="/app",
+            problem_path="/app/problem.txt",
             contract=ContractSpec(
                 install_cmd=None,
                 run_cmd="agent run --model {model} --problem {problem_statement_path}",
@@ -76,6 +77,7 @@ class FakeSandbox:
         self._id = sandbox_id
         self._task_answer = task_answer
         self._generation_status = generation_status
+        self.uploads: list[tuple[str, bytes]] = []
 
     @property
     def id(self) -> str:
@@ -89,6 +91,9 @@ class FakeSandbox:
         timeout: float | None = None,
     ) -> FakeExecResult:
         return FakeExecResult(exit_code=0, output="")
+
+    async def upload_file(self, remote_path: str, content: bytes) -> None:
+        self.uploads.append((remote_path, content))
 
     async def download_file(self, remote_path: str) -> bytes:
         # Parse task_id from path: "<final_output>/<task_id>/generation.json"
@@ -108,13 +113,16 @@ class FakeProvider:
         self.created: list[str] = []
         self.deleted: list[str] = []
         self.last_request: SandboxCreateRequest | None = None
+        self.last_sandbox: FakeSandbox | None = None
         self._generation_status = generation_status
 
     async def create_sandbox(self, request: SandboxCreateRequest) -> FakeSandbox:
         self.created.append(request.name)
         self.last_request = request
         sandbox_id = f"sandbox-{request.name}"
-        return FakeSandbox(sandbox_id=sandbox_id, generation_status=self._generation_status)
+        sandbox = FakeSandbox(sandbox_id=sandbox_id, generation_status=self._generation_status)
+        self.last_sandbox = sandbox
+        return sandbox
 
     async def delete_sandbox(self, instance_id: str) -> None:
         self.deleted.append(instance_id)
@@ -127,6 +135,8 @@ class FakeClient:
         self._source = ImageSource(image="img:latest")
         self._resources = Resources(vcpu=1, memory=2, disk=5)
         self.last_final_score_args: dict[str, object] | None = None
+        self.retrieve_task_call_count: int = 0
+        self.setup_task_call_count: int = 0
 
     async def retrieve_task(
         self,
@@ -134,6 +144,7 @@ class FakeClient:
         skip_validation: bool = False,
         dataset: str | None = None,
     ) -> RetrieveTaskResponse:
+        self.retrieve_task_call_count += 1
         return RetrieveTaskResponse(
             source=self._source,
             cwd="/app",
@@ -150,6 +161,7 @@ class FakeClient:
         dataset: str | None = None,
         sandbox_provider: object = None,
     ) -> SetupTaskResponse:
+        self.setup_task_call_count += 1
         return SetupTaskResponse(status="ok")
 
     async def evaluate_response(

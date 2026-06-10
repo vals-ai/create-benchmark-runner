@@ -148,6 +148,7 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
     assert manifest.agent.image == "registry.example.com/agent:1.0"
     assert manifest.agent.resources is not None
     assert manifest.agent.cwd == "/app"
+    assert manifest.agent.problem_path == "/app/problem.txt"
 
     # Contract fields — the manifest publishes only the explicit lab-facing
     # required_env declaration. The contract's internal `secrets` map (Vals
@@ -300,8 +301,9 @@ async def test_per_task_images(tmp_path: Path) -> None:
             benchmark="mybench",
         )
 
-    # No shared agent image in per-task mode
+    # No shared agent image in per-task mode; problem_path is still emitted (agent-level)
     assert manifest.agent.image is None
+    assert manifest.agent.problem_path == "/app/problem.txt"
 
     # Each task carries its own image ref
     task_map = {t.id: t for t in manifest.tasks}
@@ -351,7 +353,48 @@ async def test_shared_source_different_resources_is_per_task(tmp_path: Path) -> 
 
 
 # ---------------------------------------------------------------------------
-# Test 5: empty dataset → ValueError
+# Test 5: divergent problem_path → ValueError
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_divergent_problem_path_raises(tmp_path: Path) -> None:
+    """Tasks with different problem_path values must raise ValueError mentioning problem_path.
+
+    problem_path is emitted agent-level in both the shared and per-task branches,
+    so divergent values can't be represented in a manifest.
+    """
+    source = ImageSource(image="registry.example.com/agent:1.0")
+    resp_a = RetrieveTaskResponse(
+        source=source,
+        cwd="/app",
+        problem_path="/app/problem.txt",
+        agent_timeout=60.0,
+        resources=Resources(vcpu=2, memory=4, disk=10),
+    )
+    resp_b = RetrieveTaskResponse(
+        source=source,
+        cwd="/app",
+        problem_path="/app/other_problem.txt",
+        agent_timeout=60.0,
+        resources=Resources(vcpu=2, memory=4, disk=10),
+    )
+    client = FakeClient({"task-1": resp_a, "task-2": resp_b})
+    contract_path = _make_contract(tmp_path)
+
+    with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
+        with pytest.raises(ValueError, match="problem_path"):
+            await generate_manifest(
+                client=client,
+                service_url="http://svc",
+                dataset="my-dataset",
+                contract_path=contract_path,
+                benchmark="mybench",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Test 6: empty dataset → ValueError
 # ---------------------------------------------------------------------------
 
 
@@ -376,7 +419,7 @@ async def test_empty_dataset_raises(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Test 6: client without _http_client → manifest with null versions
+# Test 7: client without _http_client → manifest with null versions
 # ---------------------------------------------------------------------------
 
 

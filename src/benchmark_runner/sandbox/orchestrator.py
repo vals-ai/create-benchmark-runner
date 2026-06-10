@@ -98,6 +98,8 @@ class SandboxTaskSpec:
     resources: Resources
     cwd: str
     agent_timeout: float | None
+    question: str | None = None
+    problem_path: str | None = None
 
 
 async def run_benchmark(
@@ -183,14 +185,30 @@ async def run_benchmark(
 
         sandbox = None
         try:
-            td = await client.retrieve_task(task_id=tid, dataset=dataset)
             task_spec = task_specs.get(tid) if task_specs is not None else None
+            # Manifest-native ("local") tasks skip the service callbacks entirely:
+            # spec carries question + problem_path, so setup_task is never needed.
+            # setup_task cannot reach lab/local sandboxes from the service side;
+            # the orchestrator uploads the question itself, keeping lab credentials
+            # on the lab side.
+            local = (
+                task_spec is not None
+                and task_spec.question is not None
+                and task_spec.problem_path is not None
+            )
+            td: Any = None if local else await client.retrieve_task(task_id=tid, dataset=dataset)
             source = source_override
             if source is None:
                 source = _require_image_source(task_spec.source if task_spec is not None else td.source)
             resources = task_spec.resources if task_spec is not None else td.resources
             cwd = task_spec.cwd if task_spec is not None else td.cwd
             agent_timeout = task_spec.agent_timeout if task_spec is not None else td.agent_timeout
+            if local:
+                assert task_spec is not None  # narrowing; local implies task_spec is set
+                assert task_spec.problem_path is not None  # guaranteed by local check
+                problem_path: str = task_spec.problem_path
+            else:
+                problem_path = td.problem_path
             req = SandboxCreateRequest(
                 source=source,
                 resources=resources,
@@ -202,13 +220,17 @@ async def run_benchmark(
             )
             sandbox = await provider.create_sandbox(req)
             try:
-                await client.setup_task(task_id=tid, instance_id=sandbox.id, dataset=dataset)
+                if local:
+                    assert task_spec is not None and task_spec.question is not None
+                    await sandbox.upload_file(problem_path, task_spec.question.encode())
+                else:
+                    await client.setup_task(task_id=tid, instance_id=sandbox.id, dataset=dataset)
                 gen = await backend.generate(
                     sandbox=sandbox,
                     contract=contract,
                     task_id=tid,
                     model=model,
-                    problem_path=td.problem_path,
+                    problem_path=problem_path,
                     cwd=cwd,
                     agent_timeout=agent_timeout,
                     log_dir=artifacts.agent_logs_dir(tid),

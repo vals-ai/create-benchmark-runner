@@ -46,6 +46,13 @@ def _contract_from_manifest(mf: Manifest) -> AgentContract:
 
 
 def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
+    problem_path = mf.agent.problem_path
+    if problem_path is None:
+        click.echo(
+            "Warning: manifest has no agent.problem_path; falling back to service "
+            "retrieve/setup callbacks. Regenerate the manifest to enable manifest-native execution.",
+            err=True,
+        )
     specs: dict[str, SandboxTaskSpec] = {}
     for task in mf.tasks:
         image = task.image or mf.agent.image
@@ -62,6 +69,8 @@ def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
             resources=Resources.model_validate(resources),
             cwd=cwd,
             agent_timeout=task.timeout,
+            question=task.question if problem_path is not None else None,
+            problem_path=problem_path,
         )
     return specs
 

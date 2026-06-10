@@ -108,6 +108,45 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["task_specs"]["task-1"].resources == Resources(vcpu=2, memory=4, disk=10)
     assert call["task_specs"]["task-1"].cwd == "/app"
     assert call["task_specs"]["task-1"].agent_timeout == 60.0
+    # manifest-native fields: question from task entry, problem_path from agent block
+    assert call["task_specs"]["task-1"].question == "Q1"
+    assert call["task_specs"]["task-1"].problem_path == "/app/problem.txt"
+    assert call["task_specs"]["task-2"].question == "Q2"
+    assert call["task_specs"]["task-2"].problem_path == "/app/problem.txt"
+
+
+def test_run_manifest_mode_pre_a1_manifest_falls_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A manifest without agent.problem_path (generated before A1) falls back to
+    the service retrieve/setup path: specs carry no question/problem_path, and a
+    warning is emitted to stderr."""
+    calls: list[dict] = []
+
+    async def fake_run_sandbox(**kwargs) -> None:  # type: ignore[return]
+        calls.append(kwargs)
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_sandbox", fake_run_sandbox)
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: MagicMock()
+    )
+
+    # Build a manifest with problem_path=None (pre-A1 shape)
+    mf = make_manifest("mybench")
+    mf = mf.model_copy(update={"agent": mf.agent.model_copy(update={"problem_path": None})})
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        install_manifest(mf)
+        result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r", "mybench"])
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    spec = call["task_specs"]["task-1"]
+    assert spec.question is None
+    assert spec.problem_path is None
+    # Warning about missing problem_path is emitted to stderr (mixed into output by CliRunner)
+    assert "falling back to service retrieve/setup callbacks" in result.output
 
 
 def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:

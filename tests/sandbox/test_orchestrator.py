@@ -672,3 +672,49 @@ async def test_missing_final_output_raises_before_any_sandbox(
             provider=provider,
         )
     assert provider.created == []
+
+
+@pytest.mark.asyncio
+async def test_local_mode_skips_service_calls_and_uploads_question(
+    tmp_path: Path,
+    contract_yaml: Path,
+) -> None:
+    """Local mode (spec has question + problem_path) must never call retrieve_task or
+    setup_task — the service cannot reach lab/local sandboxes — and must upload the
+    question bytes to problem_path in the sandbox before generation."""
+    client = FakeClient()
+    provider = FakeProvider()
+
+    await run_sandbox(
+        run_id="run-local",
+        model="openai/gpt-5",
+        task_ids=["task-local"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract=AgentContract.from_yaml(contract_yaml),
+        client=client,
+        provider=provider,
+        task_specs={
+            "task-local": SandboxTaskSpec(
+                source=ImageSource(image="ghcr.io/vals-ai/agent@sha256:" + "b" * 64),
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+                agent_timeout=30.0,
+                question="What is 2+2?",
+                problem_path="/app/problem.txt",
+            )
+        },
+    )
+
+    # Service calls must never happen in local mode
+    assert client.retrieve_task_call_count == 0, "retrieve_task must not be called in local mode"
+    assert client.setup_task_call_count == 0, "setup_task must not be called in local mode"
+
+    # The question must be uploaded to the sandbox at problem_path
+    assert provider.last_sandbox is not None
+    assert provider.last_sandbox.uploads == [("/app/problem.txt", b"What is 2+2?")]
+
+    # Generation must succeed through the normal pipeline
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="run-local")
+    gen = artifacts.load_generation("task-local")
+    assert gen is not None and gen.status == GenerationStatus.SUCCESS
