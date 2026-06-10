@@ -116,7 +116,7 @@ class FakeClient:
 
 @pytest.mark.asyncio
 async def test_shared_image_manifest(tmp_path: Path) -> None:
-    """All tasks share one ImageSource → single agent.image, no per-task image.
+    """All tasks share one ImageSource → agent.image set AND every task entry carries it.
 
     Uses the real _fetch_version body with a stubbed HTTP client so version
     mapping is covered end-to-end.
@@ -172,9 +172,10 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
     assert task_ids == {"task-1", "task-2"}
     manifest_yaml = yaml.safe_dump(manifest.model_dump())
     assert "extra_field" not in manifest_yaml
-    for t in manifest.tasks:
-        # Per-task image should be absent in shared mode
-        assert t.image is None
+    for entry in manifest.tasks:
+        # Every task carries its image explicitly, even when shared (one shape
+        # for text and env benchmarks; no inherit-from-agent fallback).
+        assert entry.image == "registry.example.com/agent:1.0"
 
     # Version fields mapped correctly:
     # service.framework_version and service.service_version are direct copies (no cross-field fallback)

@@ -207,14 +207,19 @@ async def generate_manifest(
     )
 
     if shared:
+        shared_ref = _registry_ref(first.source)
         agent_spec = AgentSpec(
-            image=_registry_ref(first.source),
+            image=shared_ref,
             resources=first.resources.model_dump(),
             cwd=first.cwd,
             contract=_contract_spec(contract_path),
         )
+        # Every task entry carries its image explicitly, even when shared
+        # (design decision 2026-06-09): consumers always read tasks[].image —
+        # one shape for text and environment benchmarks, no inherit-from-agent
+        # fallback logic, per-task pinning explicit everywhere.
         task_entries = [
-            TaskEntry(id=t.id, question=t.question, timeout=t.timeout)
+            TaskEntry(id=t.id, question=t.question, timeout=t.timeout, image=shared_ref)
             for t in tasks_raw
         ]
     else:
