@@ -14,7 +14,7 @@ from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_sandbox
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.sandbox.orchestrator import _normalize_source, _resolve_secret_env
-from benchmark_runner.schemas import EvalStatus, GenerationResult, GenerationStatus, ScoreResult
+from benchmark_runner.schemas import EvalResult, EvalStatus, GenerationResult, GenerationStatus, ScoreResult
 
 
 def test_normalize_source_converts_legacy_snapshot_prefix() -> None:
@@ -133,6 +133,49 @@ async def test_run_sandbox_resume_skips_sandboxes(
     )
 
     assert second_provider.created == [], "resume should not create any new sandboxes"
+
+
+@pytest.mark.asyncio
+async def test_subset_resume_scores_against_run_config_tasks(
+    tmp_path: Path,
+    contract_yaml: Path,
+) -> None:
+    """A subset resume must keep scoring against the original run task set."""
+    run_id = "run-subset"
+    client = FakeClient()
+    provider = FakeProvider()
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id=run_id)
+    artifacts.save_run_config({
+        "run_id": run_id,
+        "model": "openai/gpt-5",
+        "tasks": ["task-a", "task-b"],
+        "dataset_name": None,
+        "task_source": "sandbox",
+    })
+    artifacts.save_generation(
+        "task-a",
+        GenerationResult(task_id="task-a", status=GenerationStatus.SUCCESS, data="ANSWER"),
+    )
+    artifacts.save_eval("task-a", EvalResult(task_id="task-a", status=EvalStatus.EVALUATED))
+
+    await run_sandbox(
+        run_id=run_id,
+        model="openai/gpt-5",
+        task_ids=["task-a"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=client,
+        provider=provider,
+    )
+
+    assert provider.created == []
+    assert client.last_final_score_args is not None
+    assert client.last_final_score_args["task-a"] is not None
+    assert client.last_final_score_args["task-b"] is None
+    score = artifacts.load_final_score()
+    assert score is not None
+    assert score.complete is False
 
 
 @pytest.mark.asyncio

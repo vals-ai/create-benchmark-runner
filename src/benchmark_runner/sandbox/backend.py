@@ -101,8 +101,8 @@ class SandboxGenerationBackend:
             # Exit code 124 means the timeout fired (not a task failure → MAX_TIME, not ERROR).
             run_cmd = (
                 contract.run_cmd
-                .replace("{problem_statement_path}", problem_path)
-                .replace("{task_id}", task_id)
+                .replace("{problem_statement_path}", shlex.quote(problem_path))
+                .replace("{task_id}", shlex.quote(task_id))
             )
             if agent_timeout:
                 run_cmd = f"timeout -k 10 {int(agent_timeout)} {run_cmd}"

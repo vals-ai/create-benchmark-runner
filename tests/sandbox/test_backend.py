@@ -1,6 +1,7 @@
 """Tests for SandboxGenerationBackend (TDD)."""
 
 import json
+import shlex
 from pathlib import Path
 
 from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
@@ -323,3 +324,30 @@ async def test_exit_code_124_returns_max_time(tmp_path: Path) -> None:
     assert result.status == GenerationStatus.MAX_TIME
     assert result.task_id == "task-5"
     assert result.error is not None
+
+
+async def test_runtime_placeholders_are_shell_quoted(tmp_path: Path) -> None:
+    """Service-provided paths and task IDs must not become shell syntax in the agent command."""
+    raw = _make_generation_json("task weird; echo nope")
+    sandbox = FakeSandbox(download_bytes=raw)
+    backend = SandboxGenerationBackend()
+    contract = AgentContract(
+        name="test-agent",
+        run_cmd="agent run --problem {problem_statement_path} --task {task_id}",
+        final_output="/app/results",
+    )
+
+    await backend.generate(
+        sandbox=sandbox,
+        contract=contract,
+        task_id="task weird; echo nope",
+        model="openai/gpt-5",
+        problem_path="/app/problems/task 1.txt; touch /tmp/pwned",
+        cwd="/app",
+        agent_timeout=None,
+        log_dir=tmp_path,
+    )
+
+    run_cmd = sandbox.commands[-1]
+    assert shlex.quote("/app/problems/task 1.txt; touch /tmp/pwned") in run_cmd
+    assert shlex.quote("task weird; echo nope") in run_cmd

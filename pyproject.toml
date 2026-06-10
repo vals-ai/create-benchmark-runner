@@ -11,7 +11,7 @@ dependencies = [
     "pydantic>=2.0",
     "python-dotenv>=1.0.0",
     "tqdm>=4.67.1",
-    "create-benchmark-service @ git+https://github.com/vals-ai/create-benchmark-service.git@main",
+    "create-benchmark-service @ git+https://github.com/vals-ai/create-benchmark-service.git@07fcfad645c8365d9f25872461dd166033cf70e2",
     "model-library>=0.1.25",
 ]
 

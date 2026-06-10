@@ -4,10 +4,9 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
-from benchmark_service.client import BenchmarkServiceClient
-from benchmark_service.sandbox import SandboxCreateRequest, SandboxProvider
+from benchmark_service.sandbox import SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SandboxSource, SnapshotSource
 
 from benchmark_runner.artifacts import RunArtifacts
@@ -77,6 +76,25 @@ SANDBOX_AUTO_STOP_INTERVAL = 30
 SANDBOX_CREATE_TIMEOUT = 600  # seconds to wait for sandbox readiness
 
 
+class SandboxProviderLike(Protocol):
+    async def create_sandbox(self, request: SandboxCreateRequest) -> Any: ...
+    async def delete_sandbox(self, instance_id: str) -> None: ...
+
+
+class BenchmarkServiceClientLike(Protocol):
+    def get_sandbox_provider(self) -> SandboxProviderLike: ...
+    async def retrieve_task(self, task_id: str, skip_validation: bool = False, dataset: str | None = None) -> Any: ...
+    async def setup_task(
+        self,
+        task_id: str,
+        instance_id: str,
+        on_message: Any = None,
+        dataset: str | None = None,
+    ) -> Any: ...
+    async def evaluate_response(self, task_id: str, response: str, dataset: str | None = None) -> Any: ...
+    async def final_score(self, evaluation_results: dict[str, Any], dataset: str | None = None) -> Any: ...
+
+
 async def run_sandbox(
     *,
     run_id: str,
@@ -85,8 +103,8 @@ async def run_sandbox(
     dataset: str | None,
     results_dir: str,
     contract_path: Path | str,
-    client: BenchmarkServiceClient,
-    provider: SandboxProvider | None = None,
+    client: BenchmarkServiceClientLike,
+    provider: SandboxProviderLike | None = None,
     parallelism: int = 10,
     source_override: SandboxSource | None = None,
 ) -> None:
@@ -115,6 +133,22 @@ async def run_sandbox(
     secret_env = _resolve_secret_env(contract)
 
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
+    config = artifacts.load_run_config()
+    if config is None:
+        config = {
+            "run_id": run_id,
+            "model": model,
+            "tasks": task_ids,
+            "dataset_name": dataset,
+            "task_source": "sandbox",
+            "payload_schema": f"{contract.name}.text.v1",
+            "payload_type": "text",
+        }
+        artifacts.save_run_config(config)
+    elif dataset is None:
+        dataset = config.get("dataset_name")
+    config_task_ids: list[str] = config["tasks"]
+
     backend = SandboxGenerationBackend()
     sem = asyncio.Semaphore(parallelism)
 
@@ -216,7 +250,7 @@ async def run_sandbox(
     missing = 0
     gen_errors = 0
     eval_errors = 0
-    for tid in task_ids:
+    for tid in config_task_ids:
         ev = artifacts.load_eval(tid)
         submitted[tid] = ev.model_dump(mode="json") if ev is not None else None
         if ev is None:
