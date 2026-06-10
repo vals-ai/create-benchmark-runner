@@ -1,7 +1,9 @@
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 from benchmark_runner import BenchmarkRunner, GenerationResult, GenerationStatus, Task
@@ -454,6 +456,61 @@ def test_run_resume_honors_service_loaded_run_config(
     assert (tmp_path / "r" / "svc-t1" / "generation.json").exists()
 
 
+@pytest.mark.parametrize("pass_dataset_file", [True, False])
+def test_run_resume_service_backed_warns_on_ignored_dataset_file(
+    make_test_adapter, tmp_path, monkeypatch, pass_dataset_file,
+):
+    """An explicit --dataset-file on a service-backed resume is ignored in favor
+    of the dataset frozen in run_config.json; warn instead of staying silent."""
+    TestRunner = make_test_adapter()
+
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="r")
+    artifacts.save_run_config({
+        "run_id": "r",
+        "model": "m",
+        "tasks": ["svc-t1"],
+        "dataset_file": None,
+        "dataset_name": "validation",
+        "task_source": "service",
+        "payload_schema": "x.text.v1",
+        "payload_type": "text",
+        "runner_version": "0.0.0",
+        "generation_version": "dev",
+    })
+
+    fetched: list[str] = []
+
+    async def stub_list_tasks(self, dataset: str):
+        fetched.append(dataset)
+        return V1DatasetTasksResponse(
+            dataset=dataset,
+            tasks=[V1Task(id="svc-t1", question="from service")],
+        )
+
+    monkeypatch.setattr(
+        "benchmark_service.client.BenchmarkServiceClient.list_tasks",
+        stub_list_tasks,
+    )
+
+    async def stub_generate(self, task, model, llm_config=None, log_dir=None):
+        return GenerationResult(
+            task_id=task.id, status=GenerationStatus.SUCCESS,
+            data="ok", question=task.question, model=model,
+        )
+    monkeypatch.setattr(TestRunner, "generate", stub_generate)
+
+    cli = make_cli(TestRunner, default_dataset_file=None, default_results_dir=str(tmp_path))
+    args = ["run", "--model", "m", "--run-id", "r", "--skip-eval"]
+    if pass_dataset_file:
+        args += ["--dataset-file", str(tmp_path / "custom.json")]
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert fetched == ["validation"]
+    warned = "--dataset-file ignored" in result.output
+    assert warned == pass_dataset_file, result.output
+
+
 def test_run_resume_file_task_source_does_not_infer_service_loading(
     make_test_adapter, tmp_path, monkeypatch,
 ):
@@ -491,6 +548,70 @@ def test_run_resume_file_task_source_does_not_infer_service_loading(
     assert result.exit_code == 0, result.output
     assert (tmp_path / "r" / "t1" / "generation.json").exists()
     assert (tmp_path / "r" / "t2" / "generation.json").exists()
+
+
+def test_run_resume_restores_file_backed_dataset_file(tmp_path, monkeypatch):
+    """Resuming a file-backed run must reload the dataset file frozen in
+    run_config.json, not silently fall back to default_dataset_file."""
+    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
+
+    default_file = tmp_path / "default.json"
+    default_file.write_text(json.dumps({"tests": [{"id": "d1", "question": "dq"}]}))
+    custom_file = tmp_path / "custom.json"
+    custom_file.write_text(
+        json.dumps({"tests": [{"id": "c1", "question": "cq1"}, {"id": "c2", "question": "cq2"}]})
+    )
+
+    loaded_files: list[str | None] = []
+
+    class FileRunner(BenchmarkRunner):
+        NAME = "test-bench"
+        PAYLOAD_TYPE = "text"
+        PAYLOAD_SCHEMA_VERSION = 1
+        GENERATION_VERSION_ENV = "TEST_BENCH_GENERATION_VERSION"
+
+        def load_tasks(self, dataset_file):
+            loaded_files.append(dataset_file)
+            data = json.loads(Path(dataset_file).read_text())
+            return [Task(id=t["id"], question=t["question"]) for t in data["tests"]]
+
+        async def generate(self, task, model, llm_config=None, log_dir=None):
+            return GenerationResult(
+                task_id=task.id,
+                status=GenerationStatus.SUCCESS,
+                data=f"answer-{task.id}",
+                question=task.question,
+                model=model,
+            )
+
+    # Seed a run_config as if created by `run --dataset-file custom.json`.
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="r")
+    artifacts.save_run_config({
+        "run_id": "r",
+        "model": "m",
+        "tasks": ["c1", "c2"],
+        "dataset_file": str(custom_file),
+        "dataset_name": None,
+        "task_source": "file",
+        "payload_schema": "test-bench.text.v1",
+        "payload_type": "text",
+        "runner_version": "0.0.0",
+        "generation_version": "dev",
+    })
+
+    cli = make_cli(
+        FileRunner,
+        default_dataset_file=str(default_file),
+        default_results_dir=str(tmp_path),
+    )
+    # Resume WITHOUT re-passing --dataset-file: must reload custom.json, not default.json.
+    result = CliRunner().invoke(cli, ["run", "--model", "m", "--run-id", "r", "--skip-eval"])
+
+    assert result.exit_code == 0, result.output
+    assert loaded_files == [str(custom_file)], loaded_files
+    assert (tmp_path / "r" / "c1" / "generation.json").exists()
+    assert (tmp_path / "r" / "c2" / "generation.json").exists()
 
 
 def test_run_resume_legacy_config_does_not_infer_service_loading(

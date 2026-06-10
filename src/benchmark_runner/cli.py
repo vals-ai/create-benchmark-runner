@@ -93,7 +93,6 @@ def make_cli(
         if problem_path and dataset_name:
             raise click.UsageError("--problem and --dataset-name are mutually exclusive")
 
-        dataset_file_resolved = dataset_file if dataset_file is not None else default_dataset_file
         custom_endpoint = custom_endpoint or os.environ.get("CUSTOM_ENDPOINT")
         custom_api_key = custom_api_key or os.environ.get("CUSTOM_API_KEY")
         service_url_resolved = service_url or os.environ.get("SERVICE_URL", "")
@@ -109,7 +108,8 @@ def make_cli(
             runner_cls=runner_cls,
             model=model, run_id=run_id, task_ids=list(task_ids),
             skip_eval=skip_eval, problem_path=problem_path,
-            dataset_file=dataset_file_resolved, dataset_name=dataset_name,
+            dataset_file=dataset_file, dataset_name=dataset_name,
+            default_dataset_file=default_dataset_file,
             results_dir=results_dir,
             service_url=service_url_resolved, parallelism=parallelism,
             default_timeout=task_timeout,
@@ -135,6 +135,7 @@ async def _run_impl(
     problem_path: str | None,
     dataset_file: str | None,
     dataset_name: str | None,
+    default_dataset_file: str | None,
     results_dir: str,
     service_url: str,
     parallelism: int,
@@ -144,8 +145,8 @@ async def _run_impl(
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     runner = runner_cls(service_url=service_url)
 
-    # If resuming a service-loaded run, honor that explicit source even when
-    # --dataset-name is not re-passed.
+    # If resuming, restore the task source frozen in run_config (service dataset
+    # name or file path) so it isn't lost when the flag isn't re-passed.
     existing_config = artifacts.load_run_config()
     if existing_config and not problem_path and not dataset_name:
         saved_task_source = existing_config.get("task_source")
@@ -153,7 +154,23 @@ async def _run_impl(
             resumed_dataset_name = existing_config.get("dataset_name")
             if not resumed_dataset_name:
                 raise click.ClickException("run_config.json has task_source=service but no dataset_name")
+            if dataset_file is not None:
+                click.echo(
+                    f"Warning: --dataset-file ignored; resuming service-backed run "
+                    f"with dataset '{resumed_dataset_name}' from run_config.json",
+                    err=True,
+                )
             dataset_name = resumed_dataset_name
+        elif saved_task_source == "file" and dataset_file is None:
+            # Restore the dataset file frozen in run_config so a resumed
+            # file-backed run reloads the same tasks instead of silently
+            # falling back to default_dataset_file.
+            dataset_file = existing_config.get("dataset_file")
+
+    # Resolve the bundled-file default only after any resume restoration, so an
+    # un-passed --dataset-file on a fresh run still uses the adapter default.
+    if dataset_file is None and not problem_path and not dataset_name:
+        dataset_file = default_dataset_file
 
     if problem_path:
         assert len(task_ids) == 1
