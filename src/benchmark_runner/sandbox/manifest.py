@@ -29,13 +29,15 @@ class ContractSpec(BaseModel):
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
-    # Names of the secret env vars the agent needs at runtime — names ONLY, never
-    # values. The agent contract maps each name to a Vals-internal secret reference
-    # (e.g. an AWS Secrets Manager name); those references are meaningless off Vals
-    # infra and must not ship in a lab deliverable, so the manifest carries just the
-    # names a lab must set in its own environment. The orchestrator's
-    # _resolve_secret_env injects only these. Defaulted for older manifests.
-    secrets: list[str] = []
+    # Lab-facing env var NAMES the lab must set for the agent to function (tool
+    # API keys like COURTLISTENER_API_KEY — the lab supplies its own values).
+    # Sourced from the contract's explicit `required_env` declaration, NEVER from
+    # its internal `secrets` map: that map is Vals's provider-key matrix and
+    # secret-manager references, which are internal implementation details and
+    # must not ship in a lab deliverable. Model access is also not listed here —
+    # labs point generation at their own endpoint via CUSTOM_ENDPOINT /
+    # CUSTOM_API_KEY, which the orchestrator forwards unconditionally.
+    required_env: list[str] = []
 
 
 class AgentSpec(BaseModel):
@@ -288,8 +290,9 @@ def _contract_spec(contract_path: Path) -> ContractSpec:
         install_cmd=c.install_cmd,
         run_cmd=c.run_cmd,
         final_output=c.final_output,
-        # Names only — drop the contract's Vals-internal secret-reference values.
-        secrets=sorted(c.secrets),
+        # Only the contract's explicit lab-facing declaration — the internal
+        # `secrets` map (Vals provider keys + secret-manager refs) never ships.
+        required_env=sorted(c.required_env),
     )
 
 

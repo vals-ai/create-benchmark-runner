@@ -69,7 +69,7 @@ def test_run_manifest_mode_uses_installed_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without --contract, the first positional is an installed benchmark name:
-    empty task ids expand to all manifest tasks, the contract (incl. secrets) is
+    empty task ids expand to all manifest tasks, the contract (incl. required_env) is
     built in memory, dataset/service URL come from the manifest, and results
     nest under <results-dir>/<benchmark>."""
     calls: list[dict] = []
@@ -112,6 +112,27 @@ def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:
     assert result.exit_code != 0
     assert "not installed" in result.output
     assert "mybench" in result.output
+
+
+def test_add_replaces_unreadable_installed_manifest(tmp_path: Path) -> None:
+    """An installed manifest from an older schema must not block reinstalling:
+    add warns, skips the pin diff, and replaces (a lab upgrading across a
+    manifest-schema change hits exactly this)."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        store = Path("benchmarks")
+        store.mkdir()
+        (store / "mybench.manifest.yaml").write_text("benchmark: mybench\nagent: [not, the, schema]\n")
+
+        manifest_file = Path("mybench.yaml")
+        manifest_file.write_text(yaml.safe_dump(make_manifest("mybench").model_dump(), sort_keys=False))
+
+        result = runner.invoke(cli, ["add", str(manifest_file)])
+        assert result.exit_code == 0, result.output
+        assert "unreadable" in result.output
+        assert "Installed mybench" in result.output
+        # Replaced copy is now loadable
+        assert "mybench" in runner.invoke(cli, ["list"]).output
 
 
 def test_add_and_list_flow(tmp_path: Path) -> None:

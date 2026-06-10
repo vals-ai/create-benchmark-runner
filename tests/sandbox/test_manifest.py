@@ -28,6 +28,8 @@ def _make_contract(tmp_path: Path) -> Path:
         "final_output: /app/results\n"
         "secrets:\n"
         "  GOOGLE_API_KEY: projects/x/google\n"
+        "required_env:\n"
+        "  - GOOGLE_API_KEY\n"
     )
     return p
 
@@ -147,12 +149,17 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
     assert manifest.agent.resources is not None
     assert manifest.agent.cwd == "/app"
 
-    # Contract fields — secrets are env-var NAMES only; the contract's Vals-internal
-    # reference value ("projects/x/google") must be dropped, never shipped in a manifest.
+    # Contract fields — the manifest publishes only the explicit lab-facing
+    # required_env declaration. The contract's internal `secrets` map (Vals
+    # provider keys + secret-manager references like "projects/x/google") is an
+    # internal implementation detail and must never appear in a manifest.
     assert manifest.agent.contract.install_cmd == "pip install -e ."
     assert manifest.agent.contract.final_output == "/app/results"
     assert "{problem_statement_path}" in manifest.agent.contract.run_cmd
-    assert manifest.agent.contract.secrets == ["GOOGLE_API_KEY"]
+    assert manifest.agent.contract.required_env == ["GOOGLE_API_KEY"]
+    dumped = manifest.model_dump()
+    assert "secrets" not in dumped["agent"]["contract"]
+    assert "projects/x/google" not in str(dumped)
 
     # Eval block
     assert manifest.eval.evaluate_endpoint == "/evaluate-response/"

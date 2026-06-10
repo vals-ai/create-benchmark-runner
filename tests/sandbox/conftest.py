@@ -40,7 +40,7 @@ def make_manifest(
                 install_cmd=None,
                 run_cmd="agent run --model {model} --problem {problem_statement_path}",
                 final_output="/app/results",
-                secrets=["GOOGLE_API_KEY"],
+                required_env=["GOOGLE_API_KEY"],
             ),
         ),
         eval=EvalSpec(

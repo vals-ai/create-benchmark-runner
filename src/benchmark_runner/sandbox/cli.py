@@ -36,10 +36,12 @@ def _contract_from_manifest(mf: Manifest) -> AgentContract:
         run_cmd=spec.run_cmd,
         install_cmd=spec.install_cmd,
         final_output=spec.final_output,
-        # The manifest carries secret env-var NAMES only; AgentContract.secrets is a
-        # name→reference map but the orchestrator reads only the keys, so map each
-        # name to itself. The lab supplies the values via its own environment.
-        secrets={name: name for name in spec.secrets},
+        # The manifest publishes lab-facing required_env NAMES only.
+        # AgentContract.secrets is a name→reference map but the orchestrator reads
+        # only the keys, so map each name to itself; the lab supplies the values
+        # via its own environment. BYO model-endpoint vars are forwarded
+        # unconditionally by the orchestrator and are deliberately not listed.
+        secrets={name: name for name in spec.required_env},
     )
 
 
@@ -194,7 +196,18 @@ def add(manifest_path: Path) -> None:
     except Exception as exc:
         raise click.ClickException(f"invalid manifest {manifest_path}: {exc}") from exc
 
-    existing = load_installed(mf.benchmark)
+    # The pin diff needs the previously-installed copy, but an unreadable one
+    # (e.g. written by an older manifest schema) must not block reinstalling —
+    # a lab upgrading across a schema change hits exactly this.
+    try:
+        existing = load_installed(mf.benchmark)
+    except Exception:
+        click.echo(
+            f"Warning: installed manifest for '{mf.benchmark}' is unreadable "
+            "(older format?); replacing without pin diff",
+            err=True,
+        )
+        existing = None
     if existing is not None:
         changes = pin_diff(existing, mf)
         if changes:
