@@ -29,11 +29,13 @@ class ContractSpec(BaseModel):
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
-    # Declared secret env-var names the agent needs at runtime (same shape as
-    # AgentContract.secrets). The orchestrator's _resolve_secret_env injects only
-    # these into the sandbox, so a manifest without them would run agents with no
-    # model/tool credentials. Defaulted for manifests generated before this field.
-    secrets: dict[str, str] = {}
+    # Names of the secret env vars the agent needs at runtime — names ONLY, never
+    # values. The agent contract maps each name to a Vals-internal secret reference
+    # (e.g. an AWS Secrets Manager name); those references are meaningless off Vals
+    # infra and must not ship in a lab deliverable, so the manifest carries just the
+    # names a lab must set in its own environment. The orchestrator's
+    # _resolve_secret_env injects only these. Defaulted for older manifests.
+    secrets: list[str] = []
 
 
 class AgentSpec(BaseModel):
@@ -286,7 +288,8 @@ def _contract_spec(contract_path: Path) -> ContractSpec:
         install_cmd=c.install_cmd,
         run_cmd=c.run_cmd,
         final_output=c.final_output,
-        secrets=c.secrets,
+        # Names only — drop the contract's Vals-internal secret-reference values.
+        secrets=sorted(c.secrets),
     )
 
 

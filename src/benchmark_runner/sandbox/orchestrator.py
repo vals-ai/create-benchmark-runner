@@ -25,6 +25,19 @@ from benchmark_runner.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Bring-your-own-model-endpoint env vars, forwarded into every sandbox when set,
+# independent of the contract. A lab evaluating its own (often unreleased) model
+# points generation at its own endpoint; the baked runner reads these from env
+# (create-benchmark-runner cli.py CUSTOM_ENDPOINT/CUSTOM_API_KEY fallbacks), so no
+# run_cmd or per-agent contract change is needed. These are universal generation
+# parameters, not agent-specific secrets, so they live here rather than in any
+# contract's `secrets:` — keeping the lab's model and endpoint off Vals infra.
+_BYO_ENDPOINT_ENV_VARS = (
+    "CUSTOM_ENDPOINT",
+    "CUSTOM_API_KEY",
+)
+
+
 def _require_image_source(source: SandboxSource) -> ImageSource:
     """Only pullable registry images are supported as sandbox sources.
 
@@ -46,6 +59,10 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
     own environment. Keying on the contract keeps unrelated orchestrator env
     (SERVICE_URL, Daytona creds) out of the sandbox; a declared name missing from
     the env is an error, since the agent would only fail later without it.
+
+    The BYO-endpoint vars (_BYO_ENDPOINT_ENV_VARS) are forwarded on top whenever
+    set, independent of the contract, so a lab can point generation at its own
+    model endpoint without editing any agent's contract.
     """
     env: dict[str, str] = {}
     missing: list[str] = []
@@ -60,6 +77,10 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
             "contract declares secret(s) not set in the orchestrator env: "
             + ", ".join(sorted(missing))
         )
+    for var_name in _BYO_ENDPOINT_ENV_VARS:
+        value = os.environ.get(var_name)
+        if value:
+            env[var_name] = value
     return env
 
 # Sandbox lifecycle constants

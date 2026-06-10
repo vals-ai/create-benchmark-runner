@@ -37,6 +37,8 @@ def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: 
     monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
     monkeypatch.setenv("TAVILY_API_KEY", "t-key")
     monkeypatch.setenv("VALS_AUTH_KEY", "should-not-leak")
+    monkeypatch.delenv("CUSTOM_ENDPOINT", raising=False)
+    monkeypatch.delenv("CUSTOM_API_KEY", raising=False)
     contract = AgentContract(
         name="x",
         run_cmd="a --problem {problem_statement_path}",
@@ -49,6 +51,17 @@ def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: 
     monkeypatch.delenv("TAVILY_API_KEY")
     with pytest.raises(ValueError, match="TAVILY_API_KEY"):
         _resolve_secret_env(contract)
+
+
+def test_resolve_secret_env_forwards_byo_endpoint_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUSTOM_ENDPOINT/CUSTOM_API_KEY are forwarded into the sandbox whenever set,
+    independent of the contract, so a lab can point generation at its own model
+    endpoint without editing any agent's contract.secrets."""
+    monkeypatch.setenv("CUSTOM_ENDPOINT", "https://my-model.internal/v1")
+    monkeypatch.setenv("CUSTOM_API_KEY", "sk-lab")
+    contract = AgentContract(name="x", run_cmd="a --problem {problem_statement_path}", secrets={})
+    env = _resolve_secret_env(contract)
+    assert env == {"CUSTOM_ENDPOINT": "https://my-model.internal/v1", "CUSTOM_API_KEY": "sk-lab"}
 
 
 @pytest.mark.asyncio

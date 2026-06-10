@@ -147,11 +147,12 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
     assert manifest.agent.resources is not None
     assert manifest.agent.cwd == "/app"
 
-    # Contract fields (incl. declared secrets — the orchestrator injects only these)
+    # Contract fields — secrets are env-var NAMES only; the contract's Vals-internal
+    # reference value ("projects/x/google") must be dropped, never shipped in a manifest.
     assert manifest.agent.contract.install_cmd == "pip install -e ."
     assert manifest.agent.contract.final_output == "/app/results"
     assert "{problem_statement_path}" in manifest.agent.contract.run_cmd
-    assert manifest.agent.contract.secrets == {"GOOGLE_API_KEY": "projects/x/google"}
+    assert manifest.agent.contract.secrets == ["GOOGLE_API_KEY"]
 
     # Eval block
     assert manifest.eval.evaluate_endpoint == "/evaluate-response/"

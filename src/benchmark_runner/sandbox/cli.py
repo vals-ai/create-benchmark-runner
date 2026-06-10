@@ -36,7 +36,10 @@ def _contract_from_manifest(mf: Manifest) -> AgentContract:
         run_cmd=spec.run_cmd,
         install_cmd=spec.install_cmd,
         final_output=spec.final_output,
-        secrets=spec.secrets,
+        # The manifest carries secret env-var NAMES only; AgentContract.secrets is a
+        # name→reference map but the orchestrator reads only the keys, so map each
+        # name to itself. The lab supplies the values via its own environment.
+        secrets={name: name for name in spec.secrets},
     )
 
 

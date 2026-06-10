@@ -94,7 +94,8 @@ def test_run_manifest_mode_uses_installed_manifest(
     (call,) = calls
     assert call["task_ids"] == ["task-1", "task-2"]  # empty task ids = all tasks
     assert call["contract_path"] is None
-    assert call["contract"].secrets == {"GOOGLE_API_KEY": "projects/x/google"}
+    # manifest carries names only; reconstructed contract maps each name to itself
+    assert call["contract"].secrets == {"GOOGLE_API_KEY": "GOOGLE_API_KEY"}
     assert "{problem_statement_path}" in call["contract"].run_cmd
     assert call["dataset"] == "mybench-dataset"
     assert call["results_dir"] == str(Path("results") / "mybench")
