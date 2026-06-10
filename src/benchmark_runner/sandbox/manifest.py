@@ -16,7 +16,6 @@ from benchmark_service.sandbox import ImageSource, SnapshotSource
 from benchmark_service.schemas import RetrieveTaskResponse, VersionResponse
 
 from benchmark_runner.sandbox.contract import AgentContract
-from benchmark_runner.sandbox.orchestrator import _normalize_source
 
 logger = logging.getLogger(__name__)
 
@@ -123,14 +122,14 @@ def _registry_ref(source: ImageSource | SnapshotSource) -> str:
     lands and retrieve_task returns a registry digest, this passes through.
     """
     # Legacy services return docker_image="snapshot:<name>", which cbs auto-wraps
-    # into an ImageSource — normalize first so a snapshot masquerading as an image
-    # ref is refused instead of emitted into an unrunnable manifest (found live:
-    # production legal-research emitted agent.image "snapshot:...-run-14").
-    source = _normalize_source(source)
-    if isinstance(source, ImageSource):
+    # into an ImageSource — treat that prefix as a snapshot too, so one
+    # masquerading as an image ref is refused instead of emitted into an
+    # unrunnable manifest (found live: production legal-research emitted
+    # agent.image "snapshot:...-run-14").
+    if isinstance(source, ImageSource) and not source.image.startswith("snapshot:"):
         return source.image
     raise ValueError(
-        f"sandbox source is a Daytona snapshot ('{source.snapshot}'), which a lab cannot "
+        f"sandbox source {source!r} is a Daytona snapshot, which a lab cannot "
         "pull; publish a registry image (digest-pinned) and have retrieve_task return it "
         "before generating a lab-hosted manifest"
     )

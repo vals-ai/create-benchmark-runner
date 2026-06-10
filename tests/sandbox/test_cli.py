@@ -7,6 +7,8 @@ import pytest
 import yaml
 from click.testing import CliRunner
 
+from benchmark_service.sandbox import Resources
+from benchmark_service.sandbox.types import ImageSource
 from tests.sandbox.conftest import make_manifest
 from benchmark_runner.sandbox.cli import cli
 from benchmark_runner.sandbox.store import install_manifest
@@ -100,6 +102,12 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["dataset"] == "mybench-dataset"
     assert call["results_dir"] == str(Path("results") / "mybench")
     assert client_urls == ["http://svc"]  # manifest's service.url
+    assert call["task_specs"]["task-1"].source == ImageSource(
+        image="ghcr.io/vals-ai/agent@sha256:" + "a" * 64
+    )
+    assert call["task_specs"]["task-1"].resources == Resources(vcpu=2, memory=4, disk=10)
+    assert call["task_specs"]["task-1"].cwd == "/app"
+    assert call["task_specs"]["task-1"].agent_timeout == 60.0
 
 
 def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:

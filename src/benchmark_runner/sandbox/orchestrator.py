@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from benchmark_service.sandbox import SandboxCreateRequest
-from benchmark_service.sandbox.types import ImageSource, SandboxSource
+from benchmark_service.sandbox.types import ImageSource, Resources, SandboxSource
 
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
@@ -90,6 +92,14 @@ SANDBOX_AUTO_STOP_INTERVAL = 30
 SANDBOX_CREATE_TIMEOUT = 600  # seconds to wait for sandbox readiness
 
 
+@dataclass(frozen=True)
+class SandboxTaskSpec:
+    source: SandboxSource
+    resources: Resources
+    cwd: str
+    agent_timeout: float | None
+
+
 async def run_benchmark(
     *,
     run_id: str,
@@ -103,6 +113,7 @@ async def run_benchmark(
     provider: SandboxProviderLike | None = None,
     parallelism: int = 10,
     source_override: ImageSource | None = None,
+    task_specs: Mapping[str, SandboxTaskSpec] | None = None,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
@@ -173,9 +184,16 @@ async def run_benchmark(
         sandbox = None
         try:
             td = await client.retrieve_task(task_id=tid, dataset=dataset)
+            task_spec = task_specs.get(tid) if task_specs is not None else None
+            source = source_override
+            if source is None:
+                source = _require_image_source(task_spec.source if task_spec is not None else td.source)
+            resources = task_spec.resources if task_spec is not None else td.resources
+            cwd = task_spec.cwd if task_spec is not None else td.cwd
+            agent_timeout = task_spec.agent_timeout if task_spec is not None else td.agent_timeout
             req = SandboxCreateRequest(
-                source=source_override if source_override is not None else _require_image_source(td.source),
-                resources=td.resources,
+                source=source,
+                resources=resources,
                 name=f"{run_id}-{tid}",
                 labels={},
                 env_vars=secret_env,
@@ -191,8 +209,8 @@ async def run_benchmark(
                     task_id=tid,
                     model=model,
                     problem_path=td.problem_path,
-                    cwd=td.cwd,
-                    agent_timeout=td.agent_timeout,
+                    cwd=cwd,
+                    agent_timeout=agent_timeout,
                     log_dir=artifacts.agent_logs_dir(tid),
                 )
             finally:
@@ -279,4 +297,4 @@ async def run_benchmark(
     artifacts.save_final_score(score)
 
 
-__all__ = ["run_benchmark"]
+__all__ = ["SandboxTaskSpec", "run_benchmark"]

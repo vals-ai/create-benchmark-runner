@@ -9,12 +9,12 @@ import yaml
 from dotenv import load_dotenv
 
 from benchmark_service.client import BenchmarkServiceClient
-from benchmark_service.sandbox.types import ImageSource
+from benchmark_service.sandbox.types import ImageSource, Resources
 
 from benchmark_runner.client import auth_headers
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.sandbox.manifest import Manifest, generate_manifest
-from benchmark_runner.sandbox.orchestrator import run_benchmark
+from benchmark_runner.sandbox.orchestrator import SandboxTaskSpec, run_benchmark
 from benchmark_runner.sandbox.store import (
     install_manifest,
     list_installed,
@@ -43,6 +43,27 @@ def _contract_from_manifest(mf: Manifest) -> AgentContract:
         # unconditionally by the orchestrator and are deliberately not listed.
         secrets={name: name for name in spec.required_env},
     )
+
+
+def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
+    specs: dict[str, SandboxTaskSpec] = {}
+    for task in mf.tasks:
+        image = task.image or mf.agent.image
+        resources = task.resources or mf.agent.resources
+        cwd = task.cwd or mf.agent.cwd
+        if image is None:
+            raise click.ClickException(f"manifest task '{task.id}' has no image pin")
+        if resources is None:
+            raise click.ClickException(f"manifest task '{task.id}' has no resources pin")
+        if cwd is None:
+            raise click.ClickException(f"manifest task '{task.id}' has no cwd pin")
+        specs[task.id] = SandboxTaskSpec(
+            source=ImageSource(image=image),
+            resources=Resources.model_validate(resources),
+            cwd=cwd,
+            agent_timeout=task.timeout,
+        )
+    return specs
 
 
 @cli.command()
@@ -81,6 +102,7 @@ def run(
 
     agent_contract: AgentContract | None = None
     contract_path: Path | None = None
+    task_specs: dict[str, SandboxTaskSpec] | None = None
     if contract is not None:
         # Direct mode: every positional is a task id (unchanged behavior).
         if not args:
@@ -103,6 +125,7 @@ def run(
             )
         task_ids = manifest_task_ids or [t.id for t in mf.tasks]
         agent_contract = _contract_from_manifest(mf)
+        task_specs = _task_specs_from_manifest(mf)
         service_url = service_url or mf.service.url
         dataset = dataset or mf.dataset.name
         results_dir = str(Path(results_dir) / mf.benchmark)
@@ -134,6 +157,7 @@ def run(
             client=client,
             parallelism=parallelism,
             source_override=source_override,
+            task_specs=task_specs,
         )
     )
 

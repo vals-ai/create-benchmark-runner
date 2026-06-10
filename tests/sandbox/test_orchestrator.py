@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from benchmark_service.sandbox import SandboxCreateRequest
+from benchmark_service.sandbox import Resources, SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SnapshotSource
-from tests.sandbox.conftest import FakeClient, FakeProvider, FakeSandbox
+from tests.sandbox.conftest import FakeClient, FakeExecResult, FakeProvider, FakeSandbox
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_benchmark
 from benchmark_runner.sandbox.contract import AgentContract
-from benchmark_runner.sandbox.orchestrator import _require_image_source, _resolve_secret_env
+from benchmark_runner.sandbox.orchestrator import SandboxTaskSpec, _require_image_source, _resolve_secret_env
 from benchmark_runner.schemas import EvalResult, EvalStatus, GenerationResult, GenerationStatus, ScoreResult
 
 
@@ -188,6 +188,69 @@ async def test_run_benchmark_resume_skips_sandboxes(
     )
 
     assert second_provider.created == [], "resume should not create any new sandboxes"
+
+
+@pytest.mark.asyncio
+async def test_task_specs_override_live_retrieve_task_sandbox_pins(
+    tmp_path: Path,
+    contract_yaml: Path,
+) -> None:
+    """Manifest mode must run against installed pins, not drifted live retrieve_task env details."""
+
+    class RecordingSandbox(FakeSandbox):
+        def __init__(self, sandbox_id: str) -> None:
+            super().__init__(sandbox_id=sandbox_id)
+            self.commands: list[str] = []
+
+        async def exec(
+            self,
+            command: str,
+            *,
+            cwd: str | None = None,
+            timeout: float | None = None,
+        ) -> FakeExecResult:
+            self.commands.append(command)
+            return await super().exec(command, cwd=cwd, timeout=timeout)
+
+    class RecordingProvider(FakeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.last_sandbox: RecordingSandbox | None = None
+
+        async def create_sandbox(self, request: SandboxCreateRequest) -> RecordingSandbox:
+            self.created.append(request.name)
+            self.last_request = request
+            sandbox = RecordingSandbox(sandbox_id=f"sandbox-{request.name}")
+            self.last_sandbox = sandbox
+            return sandbox
+
+    provider = RecordingProvider()
+
+    await run_sandbox(
+        run_id="run-pins",
+        model="openai/gpt-5",
+        task_ids=["task-pinned"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=FakeClient(),
+        provider=provider,
+        task_specs={
+            "task-pinned": SandboxTaskSpec(
+                source=ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "a" * 64),
+                resources=Resources(vcpu=8, memory=16, disk=32),
+                cwd="/pinned",
+                agent_timeout=5.0,
+            )
+        },
+    )
+
+    assert provider.last_request is not None
+    assert provider.last_request.source == ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "a" * 64)
+    assert provider.last_request.resources == Resources(vcpu=8, memory=16, disk=32)
+    assert provider.last_sandbox is not None
+    assert any(command.startswith("cd /pinned &&") for command in provider.last_sandbox.commands)
+    assert any("timeout -k 10 5" in command for command in provider.last_sandbox.commands)
 
 
 @pytest.mark.asyncio
