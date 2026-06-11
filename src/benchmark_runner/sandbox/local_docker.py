@@ -1,26 +1,7 @@
 """Local Docker implementation of the create-benchmark-service sandbox ABCs.
 
-Lets the sandbox orchestrator run against containers on the local Docker daemon
-instead of Daytona — the "test without Daytona" path. It implements the same
-``benchmark_service.sandbox`` ``SandboxProvider`` / ``Sandbox`` interface that
-``DaytonaSandbox`` does, so ``run_benchmark(provider=LocalDockerSandboxProvider())``
-is a drop-in.
-
-It imports only ``benchmark_service.sandbox.types`` (no Daytona SDK), so it runs
-in an environment where Daytona is not installed — which is the whole point.
-
-Scope: this is a drop-in for the runner-local loop the orchestrator drives
-in-process (``create_sandbox`` → ``exec`` → ``download_file`` → ``delete_sandbox``).
-The cross-process server-side steps (``client.setup_task`` / ``evaluate_instance``,
-which hit the cbs websocket) build their *own* provider server-side from
-``SANDBOX_PROVIDER`` (Daytona-only on cbs ``main``), so they cannot reach a local
-container through this provider as-is. Running the full loop locally therefore
-uses an injected client + provider (see the smoke harness), pending a cbs
-``local`` provider case or the Phase-5 ``setup_task`` decoupling.
-
 Resource limits, auto-stop, and snapshots are Daytona concepts with no faithful
 local equivalent and are intentionally ignored (snapshots are rejected outright).
-This is a local test/dev harness, not a production sandbox.
 """
 
 from __future__ import annotations
