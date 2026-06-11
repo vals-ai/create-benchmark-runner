@@ -1,18 +1,33 @@
 """Local Docker implementation of the create-benchmark-service sandbox ABCs.
 
-Resource limits, auto-stop, and snapshots are Daytona concepts with no faithful
-local equivalent and are intentionally ignored (snapshots are rejected outright).
+Lets the sandbox orchestrator run against containers on the local Docker daemon
+instead of Daytona — the "test without Daytona" path. It implements the same
+``benchmark_service.sandbox`` ``SandboxProvider`` / ``Sandbox`` interface that
+``DaytonaSandbox`` does, so ``run_benchmark(provider=LocalDockerSandboxProvider())``
+is a drop-in. Built on docker-py (no Daytona SDK); requires a reachable local
+Docker daemon.
+
+Image requirements: containers are kept alive with ``tail -f /dev/null`` and
+commands run under ``sh -c``, so the image must contain ``tail`` and a POSIX
+``sh`` — distroless/scratch images are unsupported. Container paths must be
+absolute. Resource limits and auto-stop are Daytona concepts with no faithful
+local equivalent and are intentionally ignored; snapshots are rejected outright.
+This is a local test/dev harness, not a production sandbox.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
+import io
 import posixpath
 import shlex
-import tempfile
-from collections.abc import AsyncGenerator
-from contextlib import suppress
+import tarfile
+from collections.abc import AsyncGenerator, Mapping
+from typing import cast
+
+import docker
+from docker.errors import APIError, DockerException, ImageNotFound, NotFound
+from docker.models.containers import Container
 
 from benchmark_service.sandbox.types import (
     ExecResult,
@@ -26,18 +41,16 @@ from benchmark_service.sandbox.types import (
     SandboxQuery,
 )
 
-# Marks containers this provider created, so list_sandboxes can find them.
+# Marks containers this provider created, so pre-create cleanup and
+# list_sandboxes only ever touch containers this provider owns.
 _PROVIDER_LABEL = "benchmark-runner-local-sandbox"
-# Keep-alive entrypoint so the container stays up for `docker exec`. `tail -f
-# /dev/null` works on virtually every base image; `sleep infinity` does not
-# (busybox sleep rejects "infinity").
-_KEEPALIVE_ENTRYPOINT = "tail"
-_KEEPALIVE_ARGS = ("-f", "/dev/null")
-
-
-# ---------------------------------------------------------------------------
-# Pure helpers (no I/O) and the single subprocess seam.
-# ---------------------------------------------------------------------------
+# Keep-alive so the container stays up for exec. `tail -f /dev/null` works on
+# virtually every base image; `sleep infinity` does not (busybox sleep rejects
+# "infinity"). The entrypoint/command split matters: command replaces the image
+# CMD, whereas putting the whole keep-alive in entrypoint with command=None
+# would leave the image CMD to be appended as bogus extra args to tail.
+_KEEPALIVE_ENTRYPOINT = ["tail"]
+_KEEPALIVE_COMMAND = ["-f", "/dev/null"]
 
 
 def _command(command: str, cwd: str | None, timeout: float | None) -> str:
@@ -54,90 +67,62 @@ def _command(command: str, cwd: str | None, timeout: float | None) -> str:
     return command
 
 
-def _create_argv(
-    *,
-    name: str,
-    image: str,
-    labels: dict[str, str],
-    env_vars: dict[str, str],
-    env_file: str | None = None,
-) -> list[str]:
-    """Build the ``docker run`` argv that boots a keep-alive sandbox container."""
-    argv = ["docker", "run", "-d", "--name", name, "--label", _PROVIDER_LABEL]
-    for key, value in labels.items():
-        argv += ["--label", f"{key}={value}"]
-    if env_file:
-        argv += ["--env-file", env_file]
-    for key, value in env_vars.items():
-        argv += ["-e", f"{key}={value}"]
-    argv += ["--entrypoint", _KEEPALIVE_ENTRYPOINT, image, *_KEEPALIVE_ARGS]
-    return argv
-
-
-def _exec_argv(container_id: str, full_command: str) -> list[str]:
-    """Build the ``docker exec`` argv. The command runs under ``sh -c`` because
-    the orchestrator passes shell strings (``cd x && ...``, ``timeout ...``)."""
-    return ["docker", "exec", container_id, "sh", "-c", full_command]
-
-
-async def _run(*argv: str) -> tuple[int, bytes, bytes]:
-    """The single subprocess seam: run a docker CLI command.
-
-    Returns ``(exit_code, stdout, stderr)``. Everything funnels through here so
-    tests can fake Docker by monkeypatching this one function.
-    """
-    proc = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    assert proc.returncode is not None  # communicate() waits for process exit
-    return proc.returncode, stdout, stderr
-
-
 def _require_absolute(remote_path: str) -> None:
-    """``docker cp`` resolves container-side relative paths against ``/`` while
-    exec'd commands resolve against the image WORKDIR, so a relative path would
-    mkdir in one place and copy to another. Require absolute paths instead of
+    """Docker's archive API resolves container-side relative paths against ``/``
+    while exec'd commands resolve against the image WORKDIR, so a relative path
+    would read and write in different places. Require absolute paths instead of
     picking a side; all real callers (problem statements, final_output) pass them.
     """
     if not posixpath.isabs(remote_path):
         raise SandboxError(f"container path must be absolute, got {remote_path!r}")
 
 
-async def _inspect_name(container_id: str) -> str | None:
-    """Return a container's name (sans leading '/'), or None if it does not exist."""
-    code, out, _err = await _run("docker", "inspect", "-f", "{{.Name}}", container_id)
-    return out.decode().strip().lstrip("/") if code == 0 else None
+def _tar_archive(remote_path: str, content: bytes) -> bytes:
+    """An in-memory tar that lands ``content`` at ``remote_path`` when extracted at /.
 
-
-# ---------------------------------------------------------------------------
-# Sandbox + Provider
-# ---------------------------------------------------------------------------
+    Carries explicit entries for every ancestor directory so parents are created
+    (put_archive does not mkdir -p), and mode 0o644 on the file so non-root agent
+    processes can read it (TarInfo's default would land it root-owned 0600).
+    """
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tar:
+        ancestors: list[str] = []
+        directory = posixpath.dirname(remote_path)
+        while directory != "/":
+            ancestors.append(directory)
+            directory = posixpath.dirname(directory)
+        for ancestor in reversed(ancestors):
+            dir_info = tarfile.TarInfo(ancestor.lstrip("/"))
+            dir_info.type = tarfile.DIRTYPE
+            dir_info.mode = 0o755
+            tar.addfile(dir_info)
+        file_info = tarfile.TarInfo(remote_path.lstrip("/"))
+        file_info.mode = 0o644
+        file_info.size = len(content)
+        tar.addfile(file_info, io.BytesIO(content))
+    return buf.getvalue()
 
 
 class LocalDockerSandbox(Sandbox):
     """A single local Docker container exposed through the cbs Sandbox interface."""
 
-    def __init__(self, container_id: str, name: str) -> None:
-        self._id = container_id
-        self._name = name
+    def __init__(self, container: Container) -> None:
+        self._container = container
 
     @property
     def id(self) -> str:
-        return self._id
+        return self._container.id or ""
 
     @property
     def name(self) -> str:
-        return self._name
+        return self._container.name or ""
 
     @property
     def state(self) -> str:
         # The ABC's state is a sync property and the orchestrator never reads it
-        # (only Daytona internals do), so we report the post-create state rather
-        # than block the event loop on a `docker inspect` here.
-        return "running"
+        # (only Daytona internals do), so report the container object's cached
+        # status rather than block the event loop on a reload here.
+        return self._container.status
 
     async def exec(
         self,
@@ -147,14 +132,19 @@ class LocalDockerSandbox(Sandbox):
         timeout: float | None = None,
     ) -> ExecResult:
         full = _command(command, cwd, timeout)
-        code, out, err = await _run(*_exec_argv(self._id, full))
+        try:
+            raw = await asyncio.to_thread(self._container.exec_run, ["sh", "-c", full], demux=True)
+        except (APIError, DockerException) as e:
+            raise SandboxError(f"exec failed in {self.id}: {e}") from e
+        # exec_run is untyped; with demux=True and no streaming it returns
+        # (exit_code, (stdout | None, stderr | None)).
+        exit_code, (stdout, stderr) = cast(tuple[int, tuple[bytes | None, bytes | None]], raw)
         # Combine stdout then stderr (not interleaved like Daytona's stream):
         # `backend.generate` surfaces `result.output` as the error text on a
         # nonzero exit, so the agent's stderr must be present in it.
-        output = out.decode("utf-8", "replace")
-        if err:
-            output += err.decode("utf-8", "replace")
-        return ExecResult(exit_code=code, output=output)
+        output = "\n".join(stream.decode("utf-8", "replace") for stream in (stdout, stderr) if stream)
+        # Exit code passes through untouched: 124 classifies the task as MAX_TIME upstream.
+        return ExecResult(exit_code=exit_code, output=output)
 
     async def command(
         self,
@@ -173,89 +163,142 @@ class LocalDockerSandbox(Sandbox):
 
     async def upload_file(self, remote_path: str, content: bytes) -> None:
         _require_absolute(remote_path)
-        # docker cp will not create parent directories, so ensure they exist.
-        parent = posixpath.dirname(remote_path)
-        await _run(*_exec_argv(self._id, f"mkdir -p {shlex.quote(parent)}"))
-        with tempfile.NamedTemporaryFile() as tmp:
-            tmp.write(content)
-            tmp.flush()
-            code, _out, err = await _run("docker", "cp", tmp.name, f"{self._id}:{remote_path}")
-        if code != 0:
-            raise SandboxError(
-                f"upload_file failed for {remote_path} in {self._id}: {err.decode('utf-8', 'replace').strip()}"
-            )
+        archive = _tar_archive(remote_path, content)
+        try:
+            ok = await asyncio.to_thread(self._container.put_archive, "/", archive)
+        except (APIError, DockerException) as e:
+            raise SandboxError(f"upload_file failed for {remote_path} in {self.id}: {e}") from e
+        if not ok:
+            raise SandboxError(f"upload_file failed for {remote_path} in {self.id}")
 
     async def download_file(self, remote_path: str) -> bytes:
         _require_absolute(remote_path)
-        # Must RAISE on a missing file (not return empty): `backend.generate`
-        # relies on this to classify a missing generation.json as ERROR.
-        fd, tmp_path = tempfile.mkstemp()
-        os.close(fd)
         try:
-            code, _out, err = await _run("docker", "cp", f"{self._id}:{remote_path}", tmp_path)
-            if code != 0:
-                raise SandboxError(
-                    f"download_file failed for {remote_path} in {self._id}: {err.decode('utf-8', 'replace').strip()}"
-                )
-            with open(tmp_path, "rb") as f:
-                return f.read()
-        finally:
-            with suppress(FileNotFoundError):
-                os.unlink(tmp_path)
+            # get_archive streams a tar of the requested path; drain it on the
+            # worker thread since reading the chunks is also blocking I/O.
+            archive = await asyncio.to_thread(
+                lambda: b"".join(self._container.get_archive(remote_path)[0])
+            )
+        except NotFound as e:
+            # Must RAISE on a missing file (not return empty): `backend.generate`
+            # relies on this to classify a missing generation.json as ERROR.
+            raise SandboxError(f"download_file failed for {remote_path} in {self.id}: {e}") from e
+        except (APIError, DockerException) as e:
+            raise SandboxError(f"download_file failed for {remote_path} in {self.id}: {e}") from e
+        with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+            for member in tar.getmembers():
+                if member.isfile():
+                    extracted = tar.extractfile(member)
+                    assert extracted is not None  # isfile() members are always extractable
+                    return extracted.read()
+        raise SandboxError(f"download_file: {remote_path} in {self.id} is not a regular file")
 
 
 class LocalDockerSandboxProvider(SandboxProvider):
     """Creates and manages sandboxes as containers on the local Docker daemon."""
 
-    def __init__(self, *, extra_env_file: str | None = None) -> None:
-        # Local-testing convenience: a `docker --env-file` injected into every
-        # sandbox, for env the agent needs beyond the contract-declared secrets
-        # the orchestrator passes via env_vars. Not a Daytona concept; local only.
-        self._extra_env_file = extra_env_file
+    def __init__(
+        self,
+        *,
+        extra_env: Mapping[str, str] | None = None,
+        client: docker.DockerClient | None = None,
+    ) -> None:
+        # docker.from_env() is the daemon preflight: it raises DockerException
+        # with a clear message when no daemon is reachable, so constructing the
+        # provider fails fast. `client=` is the injection seam for tests.
+        self._client = client or docker.from_env()
+        # Local-testing convenience: env merged into every sandbox, for anything
+        # the agent needs beyond the contract-declared secrets the orchestrator
+        # passes via request.env_vars (which win on conflict).
+        self._extra_env = dict(extra_env or {})
 
     async def create_sandbox(self, request: SandboxCreateRequest) -> LocalDockerSandbox:
-        if not isinstance(request.source, ImageSource):
+        if not isinstance(request.source, ImageSource) or request.source.image.startswith("snapshot:"):
             raise SandboxError(
                 "LocalDockerSandboxProvider supports only ImageSource (a pullable registry "
-                f"image); got {type(request.source).__name__}. Daytona snapshots cannot run locally."
+                f"image); got {request.source!r}. Daytona snapshots cannot run locally."
             )
         image = request.source.image
-        name = request.name
-        # Remove any stale container with this name so re-runs are idempotent.
-        # (Daytona reuses a same-named running sandbox; a local harness just rebuilds.)
-        await _run("docker", "rm", "-f", name)
-        code, out, err = await _run(
-            *_create_argv(
-                name=name,
-                image=image,
-                labels=request.labels,
-                env_vars=request.env_vars,
-                env_file=self._extra_env_file,
+        try:
+            container = await asyncio.wait_for(
+                asyncio.to_thread(self._create_container, request, image),
+                timeout=request.create_timeout,
             )
+        except TimeoutError as e:
+            raise SandboxError(f"sandbox create timed out after {request.create_timeout}s (image pull included)") from e
+        except (APIError, DockerException) as e:
+            raise SandboxError(f"sandbox create failed for image {image!r}: {e}") from e
+        return LocalDockerSandbox(container)
+
+    def _create_container(self, request: SandboxCreateRequest, image: str) -> Container:
+        """Blocking create path, run on a worker thread under request.create_timeout."""
+        # Remove any stale same-named container so re-runs are idempotent — but
+        # only if this provider made it; never force-remove someone else's.
+        try:
+            stale = self._client.containers.get(request.name)
+        except NotFound:
+            pass
+        else:
+            if _PROVIDER_LABEL not in (stale.labels or {}):
+                raise SandboxError(
+                    f"container name {request.name!r} is taken by a container this provider does not own"
+                )
+            stale.remove(force=True)
+        try:
+            self._client.images.get(image)
+        except ImageNotFound:
+            self._client.images.pull(image)
+        container = self._client.containers.run(
+            image,
+            detach=True,
+            name=request.name,
+            entrypoint=_KEEPALIVE_ENTRYPOINT,
+            command=_KEEPALIVE_COMMAND,
+            labels={_PROVIDER_LABEL: "", **request.labels},
+            environment={**self._extra_env, **request.env_vars},
         )
-        if code != 0:
-            raise SandboxError(f"docker run failed for image {image!r}: {err.decode('utf-8', 'replace').strip()}")
-        return LocalDockerSandbox(container_id=out.decode().strip(), name=name)
+        container.reload()
+        if container.status != "running":
+            logs = container.logs(tail=20).decode("utf-8", "replace").strip()
+            raise SandboxError(
+                f"container for image {image!r} exited immediately instead of staying up; the image "
+                f"must contain `tail` (used as the keep-alive entrypoint). Last logs:\n{logs}"
+            )
+        try:
+            sh_exit_code, _output = container.exec_run(["sh", "-c", "true"])
+        except APIError:
+            sh_exit_code = -1
+        if sh_exit_code != 0:
+            raise SandboxError(
+                f"image {image!r} cannot run `sh -c`; sandbox commands run under a POSIX `sh`, "
+                "which must be present in the image"
+            )
+        return container
 
     async def get_sandbox(self, instance_id: str) -> LocalDockerSandbox:
-        name = await _inspect_name(instance_id)
-        if name is None:
-            raise SandboxNotFoundError(f"Sandbox not found: {instance_id}")
-        return LocalDockerSandbox(container_id=instance_id, name=name)
+        try:
+            container = await asyncio.to_thread(self._client.containers.get, instance_id)
+        except NotFound as e:
+            raise SandboxNotFoundError(f"Sandbox not found: {instance_id}") from e
+        return LocalDockerSandbox(container)
 
     async def delete_sandbox(self, instance_id: str) -> None:
-        # Best-effort and idempotent: a missing container is not an error.
-        await _run("docker", "rm", "-f", instance_id)
+        try:
+            container = await asyncio.to_thread(self._client.containers.get, instance_id)
+        except NotFound:
+            return  # idempotent: already gone
+        try:
+            await asyncio.to_thread(container.remove, force=True)
+        except APIError as e:
+            raise SandboxError(f"delete_sandbox failed for {instance_id}: {e}") from e
 
     async def list_sandboxes(self, query: SandboxQuery) -> AsyncGenerator[LocalDockerSandbox, None]:
-        argv = ["docker", "ps", "-aq", "--filter", f"label={_PROVIDER_LABEL}"]
-        for key, value in query.labels.items():
-            argv += ["--filter", f"label={key}={value}"]
-        code, out, _err = await _run(*argv)
-        if code != 0:
-            return
-        for container_id in out.decode().split():
-            yield LocalDockerSandbox(container_id=container_id, name=await _inspect_name(container_id) or container_id)
+        label_filters = [_PROVIDER_LABEL, *(f"{key}={value}" for key, value in query.labels.items())]
+        containers = await asyncio.to_thread(
+            self._client.containers.list, all=True, filters={"label": label_filters}
+        )
+        for container in containers:
+            yield LocalDockerSandbox(container)
 
 
 __all__ = ["LocalDockerSandbox", "LocalDockerSandboxProvider"]
