@@ -122,8 +122,8 @@ async def run_benchmark(
     Handles resume: skips generation/eval if valid artifacts already exist.
 
     Exactly one of `contract_path` (load contract.yaml from disk) or `contract`
-    (an in-memory AgentContract, e.g. built from an installed manifest's
-    ContractSpec) must be provided.
+    (an in-memory AgentContract, e.g. built from an installed manifest via
+    `_contract_from_manifest`) must be provided.
 
     source_override: when set, boot every sandbox from this image instead of the
     one retrieve_task returns. Eval is text-based (the generation string is sent to

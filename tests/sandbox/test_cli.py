@@ -11,6 +11,7 @@ from benchmark_service.sandbox import Resources
 from benchmark_service.sandbox.types import ImageSource
 from tests.sandbox.conftest import make_manifest
 from benchmark_runner.sandbox.cli import cli
+from benchmark_runner.sandbox.manifest import AgentSpec, DatasetSpec, EvalSpec, Manifest, ServiceSpec, TaskEntry
 from benchmark_runner.sandbox.store import install_manifest
 
 
@@ -67,13 +68,55 @@ def test_run_no_task_ids_exits_nonzero(contract_file: str, monkeypatch: pytest.M
     assert result.exit_code != 0
 
 
+def _make_manifest_with_distinct_problem_paths(name: str = "mybench") -> Manifest:
+    """Manifest where task-1 and task-2 have DIFFERENT problem_paths, proving
+    _task_specs_from_manifest fans out per-task rather than reading agent-level."""
+    image = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64
+    return Manifest(
+        benchmark=name,
+        service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version="0.6.1"),
+        dataset=DatasetSpec(name=f"{name}-dataset"),
+        agent=AgentSpec(
+            install_cmd=None,
+            run_cmd="agent run --model {model} --problem {problem_statement_path}",
+            final_output="/app/results",
+            required_env=["GOOGLE_API_KEY"],
+        ),
+        eval=EvalSpec(
+            evaluate_endpoint="/evaluate-response/",
+            score_endpoint="/final-score/",
+            payload_schema=f"{name}.text.v1",
+        ),
+        tasks=[
+            TaskEntry(
+                id="task-1",
+                question="Q1",
+                timeout=60.0,
+                image=image,
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+                problem_path="/app/problem.txt",
+            ),
+            TaskEntry(
+                id="task-2",
+                question="Q2",
+                timeout=60.0,
+                image=image,
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+                problem_path="/app/task2_problem.txt",
+            ),
+        ],
+    )
+
+
 def test_run_manifest_mode_uses_installed_manifest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without --contract, the first positional is an installed benchmark name:
     empty task ids expand to all manifest tasks, the contract (incl. required_env) is
     built in memory, dataset/service URL come from the manifest, and results
-    nest under <results-dir>/<benchmark>."""
+    nest under <results-dir>/<benchmark>. problem_path is read per-task (not agent-level)."""
     calls: list[dict] = []
     client_urls: list[str] = []
 
@@ -89,7 +132,7 @@ def test_run_manifest_mode_uses_installed_manifest(
 
     runner = CliRunner()
     with runner.isolated_filesystem(temp_dir=tmp_path):
-        install_manifest(make_manifest("mybench"))
+        install_manifest(_make_manifest_with_distinct_problem_paths("mybench"))
         result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r", "mybench"])
 
     assert result.exit_code == 0, result.output
@@ -108,11 +151,11 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["task_specs"]["task-1"].resources == Resources(vcpu=2, memory=4, disk=10)
     assert call["task_specs"]["task-1"].cwd == "/app"
     assert call["task_specs"]["task-1"].agent_timeout == 60.0
-    # manifest-native fields: question from task entry, problem_path from agent block
+    # problem_path is per-task: each task entry has its own value (not agent-level)
     assert call["task_specs"]["task-1"].question == "Q1"
     assert call["task_specs"]["task-1"].problem_path == "/app/problem.txt"
     assert call["task_specs"]["task-2"].question == "Q2"
-    assert call["task_specs"]["task-2"].problem_path == "/app/problem.txt"
+    assert call["task_specs"]["task-2"].problem_path == "/app/task2_problem.txt"
 
 
 def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:

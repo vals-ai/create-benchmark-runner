@@ -30,18 +30,17 @@ def cli() -> None:
 
 
 def _contract_from_manifest(mf: Manifest) -> AgentContract:
-    spec = mf.agent.contract
     return AgentContract(
         name=mf.benchmark,
-        run_cmd=spec.run_cmd,
-        install_cmd=spec.install_cmd,
-        final_output=spec.final_output,
+        run_cmd=mf.agent.run_cmd,
+        install_cmd=mf.agent.install_cmd,
+        final_output=mf.agent.final_output,
         # The manifest publishes lab-facing required_env NAMES only.
         # AgentContract.secrets is a name→reference map but the orchestrator reads
         # only the keys, so map each name to itself; the lab supplies the values
         # via its own environment. BYO model-endpoint vars are forwarded
         # unconditionally by the orchestrator and are deliberately not listed.
-        secrets={name: name for name in spec.required_env},
+        secrets={name: name for name in mf.agent.required_env},
     )
 
 
@@ -53,7 +52,7 @@ def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
             cwd=task.cwd,
             agent_timeout=task.timeout,
             question=task.question,
-            problem_path=mf.agent.problem_path,
+            problem_path=task.problem_path,
         )
         for task in mf.tasks
     }

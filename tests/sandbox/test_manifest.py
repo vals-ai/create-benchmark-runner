@@ -106,9 +106,9 @@ class FakeClient:
 
 @pytest.mark.asyncio
 async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
-    """Every task entry carries its own image/resources/cwd/question/timeout;
-    problem_path is emitted agent-level. Uses the real _fetch_version body with
-    a stubbed HTTP client so version mapping is covered end-to-end."""
+    """Every task entry carries its own image/resources/cwd/question/timeout/problem_path.
+    Uses the real _fetch_version body with a stubbed HTTP client so version
+    mapping is covered end-to-end."""
     version_resp = _make_version_http_response(
         framework_version="1.0.0", service_version="0.6.1", service_name="mybench"
     )
@@ -135,18 +135,16 @@ async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
         benchmark="mybench",
     )
 
-    assert manifest.agent.problem_path == "/app/problem.txt"
-
-    # Contract fields — the manifest publishes only the explicit lab-facing
+    # Agent fields — the manifest publishes only the explicit lab-facing
     # required_env declaration. The contract's internal `secrets` map (Vals
     # provider keys + secret-manager references like "projects/x/google") is an
     # internal implementation detail and must never appear in a manifest.
-    assert manifest.agent.contract.install_cmd == "pip install -e ."
-    assert manifest.agent.contract.final_output == "/app/results"
-    assert "{problem_statement_path}" in manifest.agent.contract.run_cmd
-    assert manifest.agent.contract.required_env == ["GOOGLE_API_KEY"]
+    assert manifest.agent.install_cmd == "pip install -e ."
+    assert manifest.agent.final_output == "/app/results"
+    assert "{problem_statement_path}" in manifest.agent.run_cmd
+    assert manifest.agent.required_env == ["GOOGLE_API_KEY"]
     dumped = manifest.model_dump()
-    assert "secrets" not in dumped["agent"]["contract"]
+    assert "secrets" not in dumped["agent"]
     assert "projects/x/google" not in str(dumped)
 
     # Eval block
@@ -165,6 +163,7 @@ async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
         assert entry.cwd == "/app"
         assert entry.question == f"Question for {entry.id}"
         assert entry.timeout == 60.0
+        assert entry.problem_path == "/app/problem.txt"
     # FakeV1Task.extra_field must not leak into the serialized manifest
     assert "extra_field" not in yaml.safe_dump(manifest.model_dump())
 
@@ -256,10 +255,9 @@ def test_cli_manifest_fails_on_snapshot(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
-async def test_divergent_problem_path_raises(tmp_path: Path) -> None:
-    """Tasks with different problem_path values must raise ValueError mentioning
-    problem_path: it is emitted agent-level, so divergent per-task values can't
-    be represented in a manifest."""
+async def test_per_task_problem_paths_preserved(tmp_path: Path) -> None:
+    """Tasks with DIFFERENT problem_path values are each preserved in their own
+    TaskEntry; the per-task fan-out means no information is lost."""
     source = ImageSource(image="registry.example.com/agent:1.0")
     resp_a = RetrieveTaskResponse(
         source=source,
@@ -279,14 +277,17 @@ async def test_divergent_problem_path_raises(tmp_path: Path) -> None:
     contract_path = _make_contract(tmp_path)
 
     with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
-        with pytest.raises(ValueError, match="problem_path"):
-            await generate_manifest(
-                client=client,
-                service_url="http://svc",
-                dataset="my-dataset",
-                contract_path=contract_path,
-                benchmark="mybench",
-            )
+        manifest = await generate_manifest(
+            client=client,
+            service_url="http://svc",
+            dataset="my-dataset",
+            contract_path=contract_path,
+            benchmark="mybench",
+        )
+
+    task_map = {t.id: t for t in manifest.tasks}
+    assert task_map["task-1"].problem_path == "/app/problem.txt"
+    assert task_map["task-2"].problem_path == "/app/other_problem.txt"
 
 
 @pytest.mark.asyncio

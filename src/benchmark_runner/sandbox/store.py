@@ -18,13 +18,11 @@ MANIFEST_SUFFIX = ".manifest.yaml"
 # The fields a lab pins a benchmark on: changing any of these on re-add means
 # the lab is now running a different artifact/dataset/version combination.
 _PIN_FIELDS = (
-    "agent.problem_path",
     "dataset.name",
-    "dataset.version",
     "service.framework_version",
     "service.service_version",
 )
-_TASK_PIN_FIELDS = ("image", "resources", "cwd", "timeout")
+_TASK_PIN_FIELDS = ("image", "resources", "cwd", "timeout", "problem_path")
 
 
 def _validate_manifest_name(name: str) -> None:

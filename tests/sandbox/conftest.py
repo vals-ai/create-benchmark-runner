@@ -9,7 +9,6 @@ from benchmark_service.sandbox import ImageSource, Resources, SandboxCreateReque
 from benchmark_service.schemas import FinalScoreResponse, RetrieveTaskResponse, SetupTaskResponse
 from benchmark_runner.sandbox.manifest import (
     AgentSpec,
-    ContractSpec,
     DatasetSpec,
     EvalSpec,
     Manifest,
@@ -23,22 +22,18 @@ def make_manifest(
     name: str = "mybench",
     *,
     image: str = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64,
-    dataset_version: str | None = None,
     service_version: str | None = "0.6.1",
 ) -> Manifest:
     """Minimal valid manifest for store/CLI tests: two tasks, shared image, one secret."""
     return Manifest(
         benchmark=name,
         service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version=service_version),
-        dataset=DatasetSpec(name=f"{name}-dataset", version=dataset_version),
+        dataset=DatasetSpec(name=f"{name}-dataset"),
         agent=AgentSpec(
-            problem_path="/app/problem.txt",
-            contract=ContractSpec(
-                install_cmd=None,
-                run_cmd="agent run --model {model} --problem {problem_statement_path}",
-                final_output="/app/results",
-                required_env=["GOOGLE_API_KEY"],
-            ),
+            install_cmd=None,
+            run_cmd="agent run --model {model} --problem {problem_statement_path}",
+            final_output="/app/results",
+            required_env=["GOOGLE_API_KEY"],
         ),
         eval=EvalSpec(
             evaluate_endpoint="/evaluate-response/",
@@ -53,6 +48,7 @@ def make_manifest(
                 image=image,
                 resources=Resources(vcpu=2, memory=4, disk=10),
                 cwd="/app",
+                problem_path="/app/problem.txt",
             )
             for task_id, question in (("task-1", "Q1"), ("task-2", "Q2"))
         ],

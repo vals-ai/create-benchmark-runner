@@ -20,19 +20,13 @@ from benchmark_runner.sandbox.contract import AgentContract
 logger = logging.getLogger(__name__)
 
 
-class ContractSpec(BaseModel):
+class AgentSpec(BaseModel):
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
     # Env var NAMES the lab must set for the agent to function. Sourced from the
     # contract's explicit `required_env` declaration; internal secrets never ship.
     required_env: list[str] = []
-
-
-class AgentSpec(BaseModel):
-    # In-sandbox path where the agent expects the problem statement.
-    problem_path: str
-    contract: ContractSpec
 
 
 class EvalSpec(BaseModel):
@@ -48,6 +42,8 @@ class TaskEntry(BaseModel):
     image: str
     resources: Resources
     cwd: str
+    # In-sandbox path where the agent expects the problem statement.
+    problem_path: str
 
 
 class ServiceSpec(BaseModel):
@@ -58,7 +54,6 @@ class ServiceSpec(BaseModel):
 
 class DatasetSpec(BaseModel):
     name: str
-    version: str | None
 
 
 class Manifest(BaseModel):
@@ -131,16 +126,6 @@ async def generate_manifest(
 
     details: list[Any] = await asyncio.gather(*[_retrieve(t) for t in tasks_raw])
 
-    # problem_path is emitted agent-level, so divergent per-task values can't be
-    # represented in a manifest; reject early rather than silently dropping all
-    # but the first task's value.
-    first = details[0]
-    if any(d.problem_path != first.problem_path for d in details):
-        raise ValueError(
-            "tasks have divergent problem_path values; manifests carry problem_path at the "
-            "agent level (not per-task), so all tasks must share the same problem_path"
-        )
-
     def _task_entry(t: Any, d: Any) -> TaskEntry:
         try:
             ref = _registry_ref(d.source)
@@ -153,6 +138,7 @@ async def generate_manifest(
             image=ref,
             resources=d.resources,
             cwd=d.cwd,
+            problem_path=d.problem_path,
         )
 
     task_entries = [_task_entry(t, d) for t, d in zip(tasks_raw, details)]
@@ -164,11 +150,8 @@ async def generate_manifest(
             framework_version=version_resp.framework_version if version_resp else None,
             service_version=version_resp.service_version if version_resp else None,
         ),
-        dataset=DatasetSpec(name=dataset, version=None),
-        agent=AgentSpec(
-            problem_path=first.problem_path,
-            contract=_contract_spec(contract_path),
-        ),
+        dataset=DatasetSpec(name=dataset),
+        agent=_agent_spec(contract_path),
         # Vals-internal eval endpoints by design: the /v1 eval surface is deferred.
         # Regenerate with /v1/evaluate + /v1/score once it ships.
         eval=EvalSpec(
@@ -180,9 +163,9 @@ async def generate_manifest(
     )
 
 
-def _contract_spec(contract_path: Path) -> ContractSpec:
+def _agent_spec(contract_path: Path) -> AgentSpec:
     c = AgentContract.from_yaml(contract_path)
-    return ContractSpec(
+    return AgentSpec(
         install_cmd=c.install_cmd,
         run_cmd=c.run_cmd,
         final_output=c.final_output,
