@@ -175,7 +175,7 @@ async def run_benchmark(
                 status=GenerationStatus.ERROR,
                 data="",
                 model=model,
-                error=str(exc),
+                _format_exc(exc),
             )
 
         artifacts.save_generation(tid, gen)
