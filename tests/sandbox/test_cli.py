@@ -77,14 +77,14 @@ def test_run_manifest_mode_uses_installed_manifest(
     calls: list[dict] = []
     client_urls: list[str] = []
 
-    async def fake_run_sandbox(**kwargs) -> None:  # type: ignore[return]
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
         calls.append(kwargs)
 
     def fake_client(url: str, **kwargs: object) -> MagicMock:
         client_urls.append(url)
         return MagicMock()
 
-    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_sandbox", fake_run_sandbox)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
     monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", fake_client)
 
     runner = CliRunner()
@@ -123,10 +123,10 @@ def test_run_manifest_mode_pre_a1_manifest_falls_back(
     warning is emitted to stderr."""
     calls: list[dict] = []
 
-    async def fake_run_sandbox(**kwargs) -> None:  # type: ignore[return]
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
         calls.append(kwargs)
 
-    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_sandbox", fake_run_sandbox)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
     monkeypatch.setattr(
         "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: MagicMock()
     )

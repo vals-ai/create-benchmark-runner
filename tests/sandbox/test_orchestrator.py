@@ -226,7 +226,7 @@ async def test_task_specs_override_live_retrieve_task_sandbox_pins(
 
     provider = RecordingProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id="run-pins",
         model="openai/gpt-5",
         task_ids=["task-pinned"],
@@ -685,7 +685,7 @@ async def test_local_mode_skips_service_calls_and_uploads_question(
     client = FakeClient()
     provider = FakeProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id="run-local",
         model="openai/gpt-5",
         task_ids=["task-local"],
