@@ -69,31 +69,40 @@ class SandboxGenerationBackend:
         log_dir: Path,
     ) -> GenerationResult:
         try:
+            # Validate the contract before touching the sandbox: without final_output
+            # there is no generation file to read, so running the agent would only
+            # burn a sandbox to produce an unreadable result.
+            final_output = contract.final_output
+            if final_output is None:
+                return _error_result(
+                    task_id=task_id,
+                    model=model,
+                    error="contract.final_output is not set; no generation file to read",
+                )
+
             # Step 0: ensure cwd exists before any `cd` into it.
-            # The benchmark service may return a cwd that the image does not
-            # pre-create (e.g. legal-research returns /workspace on an image with
-            # WORKDIR /app); Valkyrie's tracker mkdir -p's it first, so mirror that.
+            # A service may return a cwd the image does not pre-create (its WORKDIR
+            # can differ), so create it rather than fail the cd.
             await sandbox.exec(f"mkdir -p {shlex.quote(cwd)}")
 
-            # Step 1: optional install
+            # Step 1: install the agent per the contract.
             # Shell-prefix the install with a timeout so a hung install doesn't block forever.
             # Do NOT pass timeout= to sandbox.exec — cbs prefixes it as a shell command which
             # would break the `cd && ...` chain.
-            install_error: str | None = None
+            # Fail fast on a nonzero exit: a broken install would only surface later as a
+            # confusing downstream agent error.
             if contract.install_cmd:
                 install_result = await sandbox.exec(
                     f"cd {shlex.quote(cwd)} && timeout {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
                 )
                 if install_result.exit_code != 0:
-                    # Best-effort: runner-framework images bake the agent in, and the
-                    # contract's install_cmd may target Valkyrie's uploaded-bundle layout
-                    # (e.g. a setup.sh that exists only in the bundle, never in the image),
-                    # so a failed install must not block the run. Keep the context and
-                    # attach it if the run produces nothing, so a genuinely broken install
-                    # is never diagnosed from a bare downstream error.
-                    install_error = (
-                        f"install failed (exit {install_result.exit_code}): "
-                        f"{install_result.output[:1024]}"
+                    return _error_result(
+                        task_id=task_id,
+                        model=model,
+                        error=(
+                            f"install failed (exit {install_result.exit_code}): "
+                            f"{install_result.output[:1024]}"
+                        ),
                     )
 
             # Step 2: build and run the agent command
@@ -110,15 +119,7 @@ class SandboxGenerationBackend:
                 f"cd {shlex.quote(cwd)} && PYTHONSAFEPATH=1 {run_cmd}",
             )
 
-            # Step 3: no final_output configured → cannot read result
-            if contract.final_output is None:
-                return _error_result(
-                    task_id=task_id,
-                    model=model,
-                    error="contract.final_output is not set; no generation file to read",
-                )
-
-            # Step 4: shell-level timeout → the process was killed before it could
+            # Step 3: shell-level timeout → the process was killed before it could
             # write a result file, so don't attempt a download.
             # Exit code 124 = `timeout` fired → MAX_TIME, not ERROR.
             if result.exit_code == 124:
@@ -129,33 +130,31 @@ class SandboxGenerationBackend:
                     error=f"agent timed out{timeout_note} (exit 124)",
                 )
 
-            # Step 5: download and parse the agent's generation.json.
+            # Step 4: download and parse the agent's generation.json.
             # Attempt this even on a nonzero exit: the runner writes a structured
             # GenerationResult (status + a real `error`) on its own failures, which
             # is far more useful than raw stdout. Only fall back to stdout when the
             # file is genuinely absent (the agent never got far enough to write it).
-            output_path = f"{contract.final_output.rstrip('/')}/{task_id}/generation.json"
+            output_path = f"{final_output.rstrip('/')}/{task_id}/generation.json"
             log_dir = Path(log_dir)
             log_dir.mkdir(parents=True, exist_ok=True)
             try:
                 content = await sandbox.download_file(output_path)
             except Exception as download_exc:
-                # No result file → surface the run's exit code + captured stdout,
-                # plus the install failure when there was one (both are the story).
-                install_note = f" [{install_error}]" if install_error else ""
+                # No result file → surface the run's exit code + captured stdout.
                 if result.exit_code != 0:
                     return _error_result(
                         task_id=task_id,
                         model=model,
                         error=(
                             f"agent exited {result.exit_code}, no generation file: "
-                            f"{result.output[:4096]}{install_note}"
+                            f"{result.output[:4096]}"
                         ),
                     )
                 return _error_result(
                     task_id=task_id,
                     model=model,
-                    error=f"could not read generation file {output_path}: {download_exc}{install_note}",
+                    error=f"could not read generation file {output_path}: {download_exc}",
                 )
 
             (log_dir / "generation_raw.json").write_bytes(content)

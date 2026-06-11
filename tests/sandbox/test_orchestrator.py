@@ -528,3 +528,29 @@ async def test_parallelism_zero_raises(
             provider=FakeProvider(),
             parallelism=0,
         )
+
+
+@pytest.mark.asyncio
+async def test_missing_final_output_raises_before_any_sandbox(
+    tmp_path: Path,
+) -> None:
+    """A contract without final_output must fail the run up front, not boot
+    a sandbox per task only to error on each."""
+    contract = tmp_path / "contract.yaml"
+    contract.write_text(
+        "name: test-agent\n"
+        "run_cmd: agent run --model {model} --problem {problem_statement_path}\n"
+    )
+    provider = FakeProvider()
+    with pytest.raises(ValueError, match="final_output"):
+        await run_sandbox(
+            run_id="run-noout",
+            model="openai/gpt-5",
+            task_ids=["task-x"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            contract_path=contract,
+            client=FakeClient(),
+            provider=provider,
+        )
+    assert provider.created == []

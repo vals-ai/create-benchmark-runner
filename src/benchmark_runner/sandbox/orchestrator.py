@@ -127,6 +127,10 @@ async def run_sandbox(
         provider = client.get_sandbox_provider()
 
     contract = AgentContract.from_yaml(Path(contract_path))
+    # Validate up front: without final_output the backend cannot read any result,
+    # so failing here beats booting a sandbox per task just to error.
+    if contract.final_output is None:
+        raise ValueError("contract.final_output is not set; no generation file to read")
     contract = contract.model_copy(update={"run_cmd": format_run_cmd(contract.run_cmd, {"model": model})})
     # Resolve the contract's declared secrets once (constant across tasks) and
     # inject them into every sandbox so the agent can reach its model/tools.
