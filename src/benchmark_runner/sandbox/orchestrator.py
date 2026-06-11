@@ -4,7 +4,7 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 from benchmark_service.sandbox import SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SandboxSource
@@ -13,6 +13,7 @@ from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
 from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
 from benchmark_runner.sandbox.contract import AgentContract, format_run_cmd
+from benchmark_runner.sandbox.protocols import BenchmarkServiceClientLike, SandboxProviderLike
 from benchmark_runner.schemas import (
     EvalResult,
     EvalResultData,
@@ -71,25 +72,6 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
 # eventually stops even if orchestrator cleanup fails.
 SANDBOX_AUTO_STOP_INTERVAL = 30
 SANDBOX_CREATE_TIMEOUT = 600  # seconds to wait for sandbox readiness
-
-
-class SandboxProviderLike(Protocol):
-    async def create_sandbox(self, request: SandboxCreateRequest) -> Any: ...
-    async def delete_sandbox(self, instance_id: str) -> None: ...
-
-
-class BenchmarkServiceClientLike(Protocol):
-    def get_sandbox_provider(self) -> SandboxProviderLike: ...
-    async def retrieve_task(self, task_id: str, skip_validation: bool = False, dataset: str | None = None) -> Any: ...
-    async def setup_task(
-        self,
-        task_id: str,
-        instance_id: str,
-        on_message: Any = None,
-        dataset: str | None = None,
-    ) -> Any: ...
-    async def evaluate_response(self, task_id: str, response: str, dataset: str | None = None) -> Any: ...
-    async def final_score(self, evaluation_results: dict[str, Any], dataset: str | None = None) -> Any: ...
 
 
 async def run_sandbox(

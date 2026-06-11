@@ -3,9 +3,9 @@
 import json
 import shlex
 from pathlib import Path
-from typing import Protocol
 
 from benchmark_runner.sandbox.contract import AgentContract
+from benchmark_runner.sandbox.protocols import SandboxLike
 from benchmark_runner.schemas import GenerationResult, GenerationStatus
 
 # cbs DaytonaSandbox.exec prefixes `timeout {t} {command}` as a shell command, so
@@ -14,16 +14,6 @@ from benchmark_runner.schemas import GenerationResult, GenerationStatus
 #
 # INSTALL_TIMEOUT_SEC: install step ceiling so a hung install can't block indefinitely.
 INSTALL_TIMEOUT_SEC = 600  # 10 min; generous for slow image setups
-
-
-class ExecResultLike(Protocol):
-    exit_code: int
-    output: str
-
-
-class SandboxLike(Protocol):
-    async def exec(self, command: str, *, cwd: str | None = None, timeout: float | None = None) -> ExecResultLike: ...
-    async def download_file(self, remote_path: str) -> bytes: ...
 
 
 def _format_exc(exc: BaseException) -> str:
