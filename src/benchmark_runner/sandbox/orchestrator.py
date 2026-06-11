@@ -169,13 +169,13 @@ async def run_benchmark(
                 except Exception as del_exc:
                     logger.warning("failed to delete sandbox %s: %s", sandbox.id, del_exc)
         except Exception as exc:
-            logger.warning("task %s generation failed: %s", tid, exc)
+            logger.warning("task %s generation failed: %s", tid, _format_exc(exc))
             gen = GenerationResult(
                 task_id=tid,
                 status=GenerationStatus.ERROR,
                 data="",
                 model=model,
-                _format_exc(exc),
+                error=_format_exc(exc),
             )
 
         artifacts.save_generation(tid, gen)

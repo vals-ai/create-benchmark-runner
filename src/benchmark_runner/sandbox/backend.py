@@ -69,7 +69,7 @@ class SandboxGenerationBackend:
             # timeout= to exec would prefix OUTSIDE the `cd && ...` chain and break it.
             if contract.install_cmd:
                 install_result = await sandbox.exec(
-                    f"cd {shlex.quote(cwd)} && timeout {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
+                    f"cd {shlex.quote(cwd)} && timeout -k 10 {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
                 )
                 if install_result.exit_code != 0:
                     return _error_result(
