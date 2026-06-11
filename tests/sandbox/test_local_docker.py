@@ -10,9 +10,11 @@ import asyncio
 import io
 import tarfile
 import time
+from typing import cast
 
 import pytest
 from docker.errors import APIError, ImageNotFound, NotFound
+from docker.models.containers import Container
 
 from benchmark_service.sandbox.types import (
     ExecResult,
@@ -158,6 +160,14 @@ def _sandbox(container: FakeContainer) -> LocalDockerSandbox:
     return LocalDockerSandbox(container)  # pyright: ignore[reportArgumentType]
 
 
+async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition was not met before timeout")
+        await asyncio.sleep(0.01)
+
+
 def test_command_matches_daytona_order():
     # timeout wraps first (inner), cwd prepends second (outer) — same as cbs _command.
     assert _command("run x", "/app", 5) == "cd /app && timeout 5 run x"
@@ -255,8 +265,30 @@ async def test_create_sandbox_timeout_cleans_up_late_container():
     client = FakeDockerClient(containers=SlowRunContainers(delay=1.05, run_result=container))
     with pytest.raises(SandboxError, match="timed out"):
         await _provider(client).create_sandbox(_request(ImageSource(image="img:tag"), create_timeout=1))
-    await asyncio.sleep(0.1)
-    assert container.removed
+    await _wait_until(lambda: container.removed)
+
+
+async def test_timeout_cleanup_ignores_cancelled_create_task():
+    loop = asyncio.get_running_loop()
+    contexts: list[dict[str, object]] = []
+    original_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: contexts.append(context))
+
+    async def never_returns_container() -> Container:
+        await asyncio.sleep(60)
+        raise AssertionError("unreachable")
+
+    try:
+        task = asyncio.create_task(never_returns_container())
+        _provider(FakeDockerClient())._cleanup_late_create(cast(asyncio.Task[Container], task))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(original_handler)
+
+    assert contexts == []
 
 
 async def test_exec_joins_demuxed_streams_with_newline():

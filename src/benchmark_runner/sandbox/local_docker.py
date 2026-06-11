@@ -243,6 +243,8 @@ class LocalDockerSandboxProvider(SandboxProvider):
         def cleanup(done: asyncio.Task[Container]) -> None:
             try:
                 container = done.result()
+            except asyncio.CancelledError:
+                return
             except Exception:
                 return
             if _is_owned(container):

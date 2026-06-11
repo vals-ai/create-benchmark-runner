@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import stat
 from pathlib import Path
 
 import pytest
@@ -373,6 +372,7 @@ async def test_setup_task_failure_deletes_sandbox_and_records_error(
 async def test_none_fill_in_final_score_when_eval_missing(
     tmp_path: Path,
     contract_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """If a task's eval cannot be saved (e.g. filesystem error), final_score receives None for that task."""
     run_id = "run-none"
@@ -387,25 +387,25 @@ async def test_none_fill_in_final_score_when_eval_missing(
         GenerationResult(task_id="task-nofs", status=GenerationStatus.SUCCESS, data="X"),
     )
 
-    # Make the task-nofs directory read-only so save_eval fails
-    task_nofs_dir = tmp_path / run_id / "task-nofs"
-    task_nofs_dir.mkdir(parents=True, exist_ok=True)
-    task_nofs_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)  # read + execute, no write
+    original_save_eval = RunArtifacts.save_eval
 
-    try:
-        await run_benchmark(
-            run_id=run_id,
-            model="openai/gpt-5",
-            task_ids=task_ids,
-            dataset=None,
-            results_dir=str(tmp_path),
-            contract_path=contract_yaml,
-            client=client,
-            provider=provider,
-        )
-    finally:
-        # Restore permissions so tmp_path cleanup works
-        task_nofs_dir.chmod(stat.S_IRWXU)
+    def save_eval_with_failure(self: RunArtifacts, task_id: str, ev: EvalResult) -> None:
+        if task_id == "task-nofs":
+            raise OSError("synthetic save_eval failure")
+        original_save_eval(self, task_id, ev)
+
+    monkeypatch.setattr(RunArtifacts, "save_eval", save_eval_with_failure)
+
+    await run_benchmark(
+        run_id=run_id,
+        model="openai/gpt-5",
+        task_ids=task_ids,
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=client,
+        provider=provider,
+    )
 
     # final_score.json written despite the error
     assert (tmp_path / run_id / "final_score.json").exists()
