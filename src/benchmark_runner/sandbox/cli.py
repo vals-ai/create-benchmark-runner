@@ -159,12 +159,18 @@ def run(
 @click.option("--dataset", required=True, help="Dataset name")
 @click.option("--contract", required=True, help="Path to the agent contract.yaml")
 @click.option("--benchmark", required=True, help="Benchmark identifier")
+@click.option(
+    "--required-env",
+    multiple=True,
+    help="Lab-facing env var required by the agent. Repeat for multiple values.",
+)
 @click.option("--output", required=True, help="Output path for the manifest YAML")
 def manifest(
     service_url: str | None,
     dataset: str,
     contract: str,
     benchmark: str,
+    required_env: tuple[str, ...],
     output: str,
 ) -> None:
     """Generate a self-contained benchmark manifest for lab-hosted consumers."""
@@ -180,6 +186,7 @@ def manifest(
                 dataset=dataset,
                 contract_path=Path(contract),
                 benchmark=benchmark,
+                required_env=list(required_env),
             )
         )
     except ValueError as exc:

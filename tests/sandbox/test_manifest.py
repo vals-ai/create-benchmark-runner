@@ -11,7 +11,7 @@ from benchmark_service.sandbox import ImageSource, SnapshotSource, Resources
 from benchmark_service.schemas import RetrieveTaskResponse
 
 from benchmark_runner.sandbox.cli import cli
-from benchmark_runner.sandbox.manifest import generate_manifest
+from benchmark_runner.sandbox.manifest import Manifest, generate_manifest
 
 
 def _make_contract(tmp_path: Path) -> Path:
@@ -23,8 +23,6 @@ def _make_contract(tmp_path: Path) -> Path:
         "final_output: /app/results\n"
         "secrets:\n"
         "  GOOGLE_API_KEY: projects/x/google\n"
-        "required_env:\n"
-        "  - GOOGLE_API_KEY\n"
     )
     return p
 
@@ -133,12 +131,10 @@ async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
         dataset="my-dataset",
         contract_path=contract_path,
         benchmark="mybench",
+        required_env=["GOOGLE_API_KEY"],
     )
 
-    # Agent fields — the manifest publishes only the explicit lab-facing
-    # required_env declaration. The contract's internal `secrets` map (Vals
-    # provider keys + secret-manager references like "projects/x/google") is an
-    # internal implementation detail and must never appear in a manifest.
+    # Agent fields must not expose internal secret-manager references.
     assert manifest.agent.install_cmd == "pip install -e ."
     assert manifest.agent.final_output == "/app/results"
     assert "{problem_statement_path}" in manifest.agent.run_cmd
@@ -252,6 +248,56 @@ def test_cli_manifest_fails_on_snapshot(tmp_path: Path, monkeypatch: pytest.Monk
     assert result.exit_code != 0
     assert "is not supported. Please contact Vals." in result.output
     assert not output_path.exists()
+
+
+def test_cli_manifest_accepts_lab_required_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Lab-facing env requirements are packaging metadata supplied to the
+    manifest generator, not fields added to Valkyrie's internal contract.yaml."""
+
+    source = ImageSource(image="registry.example.com/agent@sha256:" + "a" * 64)
+
+    class ImageClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__({"task-1": _make_retrieve_response(source)})
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: ImageClient())
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.manifest._fetch_version",
+        AsyncMock(return_value=None),
+    )
+
+    contract_path = _make_contract(tmp_path)
+    output_path = tmp_path / "manifest.yaml"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "manifest",
+            "--service-url",
+            "http://svc",
+            "--dataset",
+            "my-dataset",
+            "--contract",
+            str(contract_path),
+            "--benchmark",
+            "mybench",
+            "--required-env",
+            "TAVILY_API_KEY",
+            "--required-env",
+            "COURTLISTENER_API_KEY",
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    manifest = Manifest.model_validate(yaml.safe_load(output_path.read_text()))
+    assert manifest.agent.required_env == [
+        "COURTLISTENER_API_KEY",
+        "TAVILY_API_KEY",
+    ]
 
 
 @pytest.mark.asyncio
