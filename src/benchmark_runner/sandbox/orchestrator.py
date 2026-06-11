@@ -98,8 +98,8 @@ class SandboxTaskSpec:
     resources: Resources
     cwd: str
     agent_timeout: float | None
-    question: str | None = None
-    problem_path: str | None = None
+    question: str
+    problem_path: str
 
 
 async def run_benchmark(
@@ -186,29 +186,21 @@ async def run_benchmark(
         sandbox = None
         try:
             task_spec = task_specs.get(tid) if task_specs is not None else None
-            # Manifest-native ("local") tasks skip the service callbacks entirely:
-            # spec carries question + problem_path, so setup_task is never needed.
-            # setup_task cannot reach lab/local sandboxes from the service side;
-            # the orchestrator uploads the question itself, keeping lab credentials
-            # on the lab side.
-            local = (
-                task_spec is not None
-                and task_spec.question is not None
-                and task_spec.problem_path is not None
-            )
-            td: Any = None if local else await client.retrieve_task(task_id=tid, dataset=dataset)
-            source = source_override
-            if source is None:
-                source = _require_image_source(task_spec.source if task_spec is not None else td.source)
-            resources = task_spec.resources if task_spec is not None else td.resources
-            cwd = task_spec.cwd if task_spec is not None else td.cwd
-            agent_timeout = task_spec.agent_timeout if task_spec is not None else td.agent_timeout
-            if local:
-                assert task_spec is not None  # narrowing; local implies task_spec is set
-                assert task_spec.problem_path is not None  # guaranteed by local check
-                problem_path: str = task_spec.problem_path
+            # Manifest-native tasks (spec present) skip the service callbacks: the
+            # service cannot reach lab/local sandboxes, so the orchestrator uploads
+            # the question itself and lab credentials stay lab-side.
+            if task_spec is not None:
+                source = task_spec.source
+                resources, cwd = task_spec.resources, task_spec.cwd
+                agent_timeout, problem_path = task_spec.agent_timeout, task_spec.problem_path
             else:
-                problem_path = td.problem_path
+                td = await client.retrieve_task(task_id=tid, dataset=dataset)
+                source, resources, cwd = td.source, td.resources, td.cwd
+                agent_timeout, problem_path = td.agent_timeout, td.problem_path
+            if source_override is not None:
+                source = source_override
+            else:
+                source = _require_image_source(source)
             req = SandboxCreateRequest(
                 source=source,
                 resources=resources,
@@ -220,8 +212,7 @@ async def run_benchmark(
             )
             sandbox = await provider.create_sandbox(req)
             try:
-                if local:
-                    assert task_spec is not None and task_spec.question is not None
+                if task_spec is not None:
                     await sandbox.upload_file(problem_path, task_spec.question.encode())
                 else:
                     await client.setup_task(task_id=tid, instance_id=sandbox.id, dataset=dataset)

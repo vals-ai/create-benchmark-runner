@@ -15,7 +15,6 @@ from benchmark_runner.sandbox.manifest import (
     Manifest,
     ServiceSpec,
     TaskEntry,
-    VersionsSpec,
 )
 from benchmark_runner.schemas import GenerationStatus
 
@@ -25,17 +24,14 @@ def make_manifest(
     *,
     image: str = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64,
     dataset_version: str | None = None,
-    benchmark_service_version: str | None = "0.6.1",
+    service_version: str | None = "0.6.1",
 ) -> Manifest:
     """Minimal valid manifest for store/CLI tests: two tasks, shared image, one secret."""
     return Manifest(
         benchmark=name,
-        service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version="0.6.1"),
+        service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version=service_version),
         dataset=DatasetSpec(name=f"{name}-dataset", version=dataset_version),
         agent=AgentSpec(
-            image=image,
-            resources={"vcpu": 2, "memory": 4, "disk": 10},
-            cwd="/app",
             problem_path="/app/problem.txt",
             contract=ContractSpec(
                 install_cmd=None,
@@ -50,12 +46,16 @@ def make_manifest(
             payload_schema=f"{name}.text.v1",
         ),
         tasks=[
-            TaskEntry(id="task-1", question="Q1", timeout=60.0),
-            TaskEntry(id="task-2", question="Q2", timeout=60.0),
+            TaskEntry(
+                id=task_id,
+                question=question,
+                timeout=60.0,
+                image=image,
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+            )
+            for task_id, question in (("task-1", "Q1"), ("task-2", "Q2"))
         ],
-        versions=VersionsSpec(
-            benchmark_service=benchmark_service_version, eval=None, dataset=None, image=None
-        ),
     )
 
 
@@ -78,6 +78,7 @@ class FakeSandbox:
         self._task_answer = task_answer
         self._generation_status = generation_status
         self.uploads: list[tuple[str, bytes]] = []
+        self.commands: list[str] = []
 
     @property
     def id(self) -> str:
@@ -90,6 +91,7 @@ class FakeSandbox:
         cwd: str | None = None,
         timeout: float | None = None,
     ) -> FakeExecResult:
+        self.commands.append(command)
         return FakeExecResult(exit_code=0, output="")
 
     async def upload_file(self, remote_path: str, content: bytes) -> None:

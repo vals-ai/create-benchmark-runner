@@ -115,40 +115,6 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["task_specs"]["task-2"].problem_path == "/app/problem.txt"
 
 
-def test_run_manifest_mode_pre_a1_manifest_falls_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A manifest without agent.problem_path (generated before A1) falls back to
-    the service retrieve/setup path: specs carry no question/problem_path, and a
-    warning is emitted to stderr."""
-    calls: list[dict] = []
-
-    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
-        calls.append(kwargs)
-
-    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
-    monkeypatch.setattr(
-        "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: MagicMock()
-    )
-
-    # Build a manifest with problem_path=None (pre-A1 shape)
-    mf = make_manifest("mybench")
-    mf = mf.model_copy(update={"agent": mf.agent.model_copy(update={"problem_path": None})})
-
-    runner = CliRunner()
-    with runner.isolated_filesystem(temp_dir=tmp_path):
-        install_manifest(mf)
-        result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r", "mybench"])
-
-    assert result.exit_code == 0, result.output
-    (call,) = calls
-    spec = call["task_specs"]["task-1"]
-    assert spec.question is None
-    assert spec.problem_path is None
-    # Warning about missing problem_path is emitted to stderr (mixed into output by CliRunner)
-    assert "falling back to service retrieve/setup callbacks" in result.output
-
-
 def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:
     """An uninstalled benchmark name fails fast and names what IS installed."""
     runner = CliRunner()
@@ -205,12 +171,12 @@ def test_add_and_list_flow(tmp_path: Path) -> None:
         assert result.exit_code == 0
         assert "no pin changes" in result.output
 
-        # Re-add with a new agent digest → pin diff line before replacing
+        # Re-add with a new image digest → per-task pin diff lines before replacing
         changed = make_manifest("mybench", image="ghcr.io/vals-ai/agent@sha256:" + "b" * 64)
         manifest_file.write_text(yaml.safe_dump(changed.model_dump(), sort_keys=False))
         result = runner.invoke(cli, ["add", str(manifest_file)])
         assert result.exit_code == 0
-        assert "agent.image" in result.output and "→" in result.output
+        assert "tasks.task-1.image" in result.output and "→" in result.output
 
         result = runner.invoke(cli, ["list"])
         assert result.exit_code == 0

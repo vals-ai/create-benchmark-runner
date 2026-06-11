@@ -12,44 +12,26 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from benchmark_service.sandbox import ImageSource, SnapshotSource
+from benchmark_service.sandbox import ImageSource, Resources, SnapshotSource
 from benchmark_service.schemas import RetrieveTaskResponse, VersionResponse
 
 from benchmark_runner.sandbox.contract import AgentContract
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Typed manifest models
-# ---------------------------------------------------------------------------
-
 
 class ContractSpec(BaseModel):
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
-    # Lab-facing env var NAMES the lab must set for the agent to function (tool
-    # API keys like COURTLISTENER_API_KEY — the lab supplies its own values).
-    # Sourced from the contract's explicit `required_env` declaration, NEVER from
-    # its internal `secrets` map: that map is Vals's provider-key matrix and
-    # secret-manager references, which are internal implementation details and
-    # must not ship in a lab deliverable. Model access is also not listed here —
-    # labs point generation at their own endpoint via CUSTOM_ENDPOINT /
-    # CUSTOM_API_KEY, which the orchestrator forwards unconditionally.
+    # Env var NAMES the lab must set for the agent to function. Sourced from the
+    # contract's explicit `required_env` declaration; internal secrets never ship.
     required_env: list[str] = []
 
 
 class AgentSpec(BaseModel):
-    image: str | None
-    resources: dict[str, Any] | None
-    cwd: str | None
-    # In-sandbox path where the agent expects the problem statement file.
-    # Consumed by manifest-native runs to upload the question without calling
-    # the service's setup_task (task A2/A3).
-    # Defaults to None so manifests generated before this field existed (e.g.
-    # already-delivered lab manifests like legal-research E1) still load cleanly
-    # via store.py re-validation; callers fall back to an explicit callback path.
-    problem_path: str | None = None
+    # In-sandbox path where the agent expects the problem statement.
+    problem_path: str
     contract: ContractSpec
 
 
@@ -63,9 +45,9 @@ class TaskEntry(BaseModel):
     id: str
     question: str
     timeout: float | None
-    image: str | None = None
-    resources: dict[str, Any] | None = None
-    cwd: str | None = None
+    image: str
+    resources: Resources
+    cwd: str
 
 
 class ServiceSpec(BaseModel):
@@ -79,13 +61,6 @@ class DatasetSpec(BaseModel):
     version: str | None
 
 
-class VersionsSpec(BaseModel):
-    benchmark_service: str | None
-    eval: str | None
-    dataset: str | None
-    image: str | None
-
-
 class Manifest(BaseModel):
     benchmark: str
     service: ServiceSpec
@@ -93,19 +68,10 @@ class Manifest(BaseModel):
     agent: AgentSpec
     eval: EvalSpec
     tasks: list[TaskEntry]
-    versions: VersionsSpec
-
-
-# ---------------------------------------------------------------------------
-# Version fetch — injectable for tests, graceful on failure
-# ---------------------------------------------------------------------------
 
 
 async def _fetch_version(http_client: Any, service_url: str) -> VersionResponse | None:
-    """GET {service_url}/version using the provided async HTTP client.
-
-    Returns None on any error so a failed version fetch never aborts the manifest.
-    """
+    """GET {service_url}/version; None on any error so a failed fetch never aborts the manifest."""
     try:
         resp = await http_client.get(f"{service_url}/version")
         resp.raise_for_status()
@@ -115,36 +81,13 @@ async def _fetch_version(http_client: Any, service_url: str) -> VersionResponse 
         return None
 
 
-# ---------------------------------------------------------------------------
-# Image source helpers
-# ---------------------------------------------------------------------------
-
-
 def _registry_ref(source: ImageSource | SnapshotSource) -> str:
-    """Return the pullable registry image reference for a sandbox source.
-
-    A lab-hosted manifest must reference registry images a lab can pull, so a
-    Daytona snapshot (Vals-internal, not pullable) is rejected here rather than
-    emitted into an unusable manifest. Once the image-publishing workstream
-    lands and retrieve_task returns a registry digest, this passes through.
-    """
+    """Pullable registry image ref for a sandbox source; snapshots are refused."""
     # Legacy services return docker_image="snapshot:<name>", which cbs auto-wraps
-    # into an ImageSource — treat that prefix as a snapshot too, so one
-    # masquerading as an image ref is refused instead of emitted into an
-    # unrunnable manifest (found live: production legal-research emitted
-    # agent.image "snapshot:...-run-14").
+    # into an ImageSource — refuse that prefix like a real SnapshotSource.
     if isinstance(source, ImageSource) and not source.image.startswith("snapshot:"):
         return source.image
-    raise ValueError(
-        f"sandbox source {source!r} is a Daytona snapshot, which a lab cannot "
-        "pull; publish a registry image (digest-pinned) and have retrieve_task return it "
-        "before generating a lab-hosted manifest"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Core generator
-# ---------------------------------------------------------------------------
+    raise ValueError(f"Snapshot source={source} is not supported. Please contact Vals.")
 
 
 async def generate_manifest(
@@ -156,25 +99,14 @@ async def generate_manifest(
     benchmark: str,
     payload_schema: str | None = None,
 ) -> Manifest:
-    """Generate a self-contained benchmark manifest.
+    """Generate a self-contained benchmark manifest for lab-hosted consumers.
 
-    Args:
-        client: BenchmarkServiceClient (or compatible fake in tests).
-        service_url: Base URL of the deployed benchmark service.
-        dataset: Dataset name to enumerate.
-        contract_path: Path to the agent contract.yaml.
-        benchmark: Benchmark identifier (used in payload_schema default).
-        payload_schema: Override for the eval payload schema.
-            Defaults to ``{benchmark}.text.v1``.
-
-    Returns:
-        A populated Manifest ready to serialize.
+    payload_schema defaults to ``{benchmark}.text.v1``.
     """
     payload_schema = payload_schema or f"{benchmark}.text.v1"
 
-    # --- Version (graceful) -------------------------------------------------
-    # Use getattr so a client without _http_client (e.g. in tests or alternate
-    # implementations) simply skips the version fetch rather than crashing.
+    # getattr so a client without _http_client (tests, alternate implementations)
+    # skips the version fetch rather than crashing.
     http_client = getattr(client, "_http_client", None)
     if http_client is None:
         logger.warning("Client has no _http_client; version fields will be None")
@@ -182,14 +114,12 @@ async def generate_manifest(
     else:
         version_resp = await _fetch_version(http_client, service_url)
 
-    # --- Task list ----------------------------------------------------------
     list_resp = await client.list_tasks(dataset)
     tasks_raw = list_resp.tasks
 
     if not tasks_raw:
         raise ValueError(f"dataset '{dataset}' has no tasks; cannot generate a manifest")
 
-    # --- Retrieve details for each task (bounded concurrency) ---------------
     semaphore = asyncio.Semaphore(10)
 
     async def _retrieve(task: Any) -> RetrieveTaskResponse:
@@ -201,110 +131,52 @@ async def generate_manifest(
 
     details: list[Any] = await asyncio.gather(*[_retrieve(t) for t in tasks_raw])
 
-    # --- Shared vs per-task detection ---------------------------------------
-    # All three of source, resources, and cwd must be identical across tasks
-    # for the shared branch.  Checking only source was a bug: if tasks shared
-    # an image but differed in resources or cwd, later tasks' requirements
-    # would be silently dropped (first task's values promoted to agent block).
+    # problem_path is emitted agent-level, so divergent per-task values can't be
+    # represented in a manifest; reject early rather than silently dropping all
+    # but the first task's value.
     first = details[0]
-
-    # problem_path is emitted agent-level in both branches (shared and per-task),
-    # so divergent per-task values can't be represented in a manifest. Reject early
-    # rather than silently dropping all but the first task's value — the same bug
-    # class the shared/resources check above was added to prevent.
     if any(d.problem_path != first.problem_path for d in details):
         raise ValueError(
             "tasks have divergent problem_path values; manifests carry problem_path at the "
             "agent level (not per-task), so all tasks must share the same problem_path"
         )
 
-    shared = all(
-        d.source == first.source and d.resources == first.resources and d.cwd == first.cwd
-        for d in details
-    )
-
-    if shared:
-        shared_ref = _registry_ref(first.source)
-        agent_spec = AgentSpec(
-            image=shared_ref,
-            resources=first.resources.model_dump(),
-            cwd=first.cwd,
-            problem_path=first.problem_path,
-            contract=_contract_spec(contract_path),
-        )
-        # Every task entry carries its image explicitly, even when shared
-        # (design decision 2026-06-09): consumers always read tasks[].image —
-        # one shape for text and environment benchmarks, no inherit-from-agent
-        # fallback logic, per-task pinning explicit everywhere.
-        task_entries = [
-            TaskEntry(id=t.id, question=t.question, timeout=t.timeout, image=shared_ref)
-            for t in tasks_raw
-        ]
-    else:
-        # Per-task images; agent block has no shared image but still carries contract.
-        # Each TaskEntry carries its own image, resources, and cwd.
-        agent_spec = AgentSpec(
-            image=None,
-            resources=None,
-            cwd=None,
-            problem_path=first.problem_path,
-            contract=_contract_spec(contract_path),
+    def _task_entry(t: Any, d: Any) -> TaskEntry:
+        try:
+            ref = _registry_ref(d.source)
+        except ValueError as exc:
+            raise ValueError(f"task {t.id}: {exc}") from exc
+        return TaskEntry(
+            id=t.id,
+            question=t.question,
+            timeout=t.timeout,
+            image=ref,
+            resources=d.resources,
+            cwd=d.cwd,
         )
 
-        def _per_task_entry(t: Any, d: Any) -> TaskEntry:
-            try:
-                ref = _registry_ref(d.source)
-            except ValueError as exc:
-                raise ValueError(f"task {t.id}: {exc}") from exc
-            return TaskEntry(
-                id=t.id,
-                question=t.question,
-                timeout=t.timeout,
-                image=ref,
-                resources=d.resources.model_dump(),
-                cwd=d.cwd,
-            )
-
-        task_entries = [_per_task_entry(t, d) for t, d in zip(tasks_raw, details)]
-
-    # --- Versions block -----------------------------------------------------
-    # /version gives framework_version + service_version.  We copy each field
-    # directly into ServiceSpec (no cross-field fallback) so consumers can tell
-    # them apart.  For the single-value versions.benchmark_service summary we
-    # prefer service_version and fall back to framework_version, since the
-    # framework version is always populated but service_version is more specific.
-    # eval/dataset/image versions are not available from this endpoint.
-    fw_version: str | None = None
-    svc_version: str | None = None
-    if version_resp is not None:
-        fw_version = version_resp.framework_version
-        svc_version = version_resp.service_version
+    task_entries = [_task_entry(t, d) for t, d in zip(tasks_raw, details)]
 
     return Manifest(
         benchmark=benchmark,
         service=ServiceSpec(
             url=service_url,
-            framework_version=fw_version,
-            service_version=svc_version,
+            framework_version=version_resp.framework_version if version_resp else None,
+            service_version=version_resp.service_version if version_resp else None,
         ),
         dataset=DatasetSpec(name=dataset, version=None),
-        agent=agent_spec,
-        # Near-term internal Vals eval endpoints by deliberate design decision.
-        # Vals owns eval for initial lab/partner integrations; the /v1 eval surface
-        # (/v1/evaluate + /v1/score) is deferred and not yet implemented.
-        # Regenerate with /v1/evaluate + /v1/score once that surface ships.
+        agent=AgentSpec(
+            problem_path=first.problem_path,
+            contract=_contract_spec(contract_path),
+        ),
+        # Vals-internal eval endpoints by design: the /v1 eval surface is deferred.
+        # Regenerate with /v1/evaluate + /v1/score once it ships.
         eval=EvalSpec(
             evaluate_endpoint="/evaluate-response/",
             score_endpoint="/final-score/",
             payload_schema=payload_schema,
         ),
         tasks=task_entries,
-        versions=VersionsSpec(
-            benchmark_service=svc_version or fw_version,
-            eval=None,
-            dataset=None,
-            image=None,
-        ),
     )
 
 
@@ -314,8 +186,7 @@ def _contract_spec(contract_path: Path) -> ContractSpec:
         install_cmd=c.install_cmd,
         run_cmd=c.run_cmd,
         final_output=c.final_output,
-        # Only the contract's explicit lab-facing declaration — the internal
-        # `secrets` map (Vals provider keys + secret-manager refs) never ships.
+        # Only the explicit lab-facing declaration — the internal `secrets` map never ships.
         required_env=sorted(c.required_env),
     )
 

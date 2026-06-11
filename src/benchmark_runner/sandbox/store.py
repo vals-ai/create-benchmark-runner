@@ -10,14 +10,20 @@ from pathlib import Path
 
 import yaml
 
-from benchmark_runner.sandbox.manifest import Manifest, VersionsSpec
+from benchmark_runner.sandbox.manifest import Manifest
 
 DEFAULT_STORE_DIR = Path("benchmarks")
 MANIFEST_SUFFIX = ".manifest.yaml"
 
 # The fields a lab pins a benchmark on: changing any of these on re-add means
 # the lab is now running a different artifact/dataset/version combination.
-_PIN_FIELDS = ("agent.image", "dataset.name", "dataset.version")
+_PIN_FIELDS = (
+    "agent.problem_path",
+    "dataset.name",
+    "dataset.version",
+    "service.framework_version",
+    "service.service_version",
+)
 _TASK_PIN_FIELDS = ("image", "resources", "cwd", "timeout")
 
 
@@ -60,11 +66,8 @@ def list_installed(store_dir: Path = DEFAULT_STORE_DIR) -> list[Manifest]:
 
 
 def pin_diff(old: Manifest, new: Manifest) -> list[str]:
-    """Changed pins between an installed manifest and its replacement.
-
-    Compares the agent image ref, dataset name/version, and every field of the
-    versions block. Returns ``field: old → new`` lines; empty means no pin changes.
-    """
+    """Changed pins between an installed manifest and its replacement, as
+    ``field: old → new`` lines; empty means no pin changes."""
 
     def _get(manifest: Manifest, dotted: str) -> object:
         obj: object = manifest
@@ -72,10 +75,9 @@ def pin_diff(old: Manifest, new: Manifest) -> list[str]:
             obj = getattr(obj, part)
         return obj
 
-    fields = list(_PIN_FIELDS) + [f"versions.{name}" for name in VersionsSpec.model_fields]
     changes = [
         f"{field}: {_get(old, field)} → {_get(new, field)}"
-        for field in fields
+        for field in _PIN_FIELDS
         if _get(old, field) != _get(new, field)
     ]
     old_tasks = {task.id: task for task in old.tasks}

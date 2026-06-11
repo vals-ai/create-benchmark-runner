@@ -11,12 +11,7 @@ from benchmark_service.sandbox import ImageSource, SnapshotSource, Resources
 from benchmark_service.schemas import RetrieveTaskResponse
 
 from benchmark_runner.sandbox.cli import cli
-from benchmark_runner.sandbox.manifest import Manifest, generate_manifest
-
-
-# ---------------------------------------------------------------------------
-# Helpers / fixtures
-# ---------------------------------------------------------------------------
+from benchmark_runner.sandbox.manifest import generate_manifest
 
 
 def _make_contract(tmp_path: Path) -> Path:
@@ -109,26 +104,24 @@ class FakeClient:
         return self._retrieve_responses[task_id]
 
 
-# ---------------------------------------------------------------------------
-# Test 1: shared-image benchmark
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
-async def test_shared_image_manifest(tmp_path: Path) -> None:
-    """All tasks share one ImageSource → agent.image set AND every task entry carries it.
-
-    Uses the real _fetch_version body with a stubbed HTTP client so version
-    mapping is covered end-to-end.
-    """
-    source = ImageSource(image="registry.example.com/agent:1.0")
+async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
+    """Every task entry carries its own image/resources/cwd/question/timeout;
+    problem_path is emitted agent-level. Uses the real _fetch_version body with
+    a stubbed HTTP client so version mapping is covered end-to-end."""
     version_resp = _make_version_http_response(
         framework_version="1.0.0", service_version="0.6.1", service_name="mybench"
     )
     client = FakeClient(
         {
-            "task-1": _make_retrieve_response(source),
-            "task-2": _make_retrieve_response(source),
+            "task-1": _make_retrieve_response(
+                ImageSource(image="registry.example.com/agent-a:1.0"),
+                resources=Resources(vcpu=2, memory=4, disk=10),
+            ),
+            "task-2": _make_retrieve_response(
+                ImageSource(image="registry.example.com/agent-b:2.0"),
+                resources=Resources(vcpu=4, memory=8, disk=20),
+            ),
         },
         version_response=version_resp,
     )
@@ -142,12 +135,6 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
         benchmark="mybench",
     )
 
-    assert isinstance(manifest, Manifest)
-
-    # Agent block has shared image
-    assert manifest.agent.image == "registry.example.com/agent:1.0"
-    assert manifest.agent.resources is not None
-    assert manifest.agent.cwd == "/app"
     assert manifest.agent.problem_path == "/app/problem.txt"
 
     # Contract fields — the manifest publishes only the explicit lab-facing
@@ -167,29 +154,23 @@ async def test_shared_image_manifest(tmp_path: Path) -> None:
     assert manifest.eval.score_endpoint == "/final-score/"
     assert manifest.eval.payload_schema == "mybench.text.v1"
 
-    # Tasks are baked (id/question/timeout only — extra_field NOT leaked into serialized manifest)
-    assert len(manifest.tasks) == 2
-    task_ids = {t.id for t in manifest.tasks}
-    assert task_ids == {"task-1", "task-2"}
-    manifest_yaml = yaml.safe_dump(manifest.model_dump())
-    assert "extra_field" not in manifest_yaml
+    # Every task entry is fully populated — no inherit-from-agent fallback exists.
+    task_map = {t.id: t for t in manifest.tasks}
+    assert set(task_map) == {"task-1", "task-2"}
+    assert task_map["task-1"].image == "registry.example.com/agent-a:1.0"
+    assert task_map["task-2"].image == "registry.example.com/agent-b:2.0"
+    assert task_map["task-1"].resources == Resources(vcpu=2, memory=4, disk=10)
+    assert task_map["task-2"].resources == Resources(vcpu=4, memory=8, disk=20)
     for entry in manifest.tasks:
-        # Every task carries its image explicitly, even when shared (one shape
-        # for text and env benchmarks; no inherit-from-agent fallback).
-        assert entry.image == "registry.example.com/agent:1.0"
+        assert entry.cwd == "/app"
+        assert entry.question == f"Question for {entry.id}"
+        assert entry.timeout == 60.0
+    # FakeV1Task.extra_field must not leak into the serialized manifest
+    assert "extra_field" not in yaml.safe_dump(manifest.model_dump())
 
-    # Version fields mapped correctly:
-    # service.framework_version and service.service_version are direct copies (no cross-field fallback)
+    # /version fields are direct copies (no cross-field fallback)
     assert manifest.service.framework_version == "1.0.0"
     assert manifest.service.service_version == "0.6.1"
-    # versions.benchmark_service prefers service_version
-    assert manifest.versions.benchmark_service == "0.6.1"
-
-
-# ---------------------------------------------------------------------------
-# Test 2: snapshot source → generation fails (a lab-hosted manifest must
-# reference a pullable registry image, never a Daytona snapshot)
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -200,7 +181,7 @@ async def test_snapshot_source_raises(tmp_path: Path) -> None:
     contract_path = _make_contract(tmp_path)
 
     with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
-        with pytest.raises(ValueError, match="Daytona snapshot"):
+        with pytest.raises(ValueError, match="is not supported"):
             await generate_manifest(
                 client=client,
                 service_url="http://svc",
@@ -214,8 +195,8 @@ async def test_snapshot_source_raises(tmp_path: Path) -> None:
 async def test_legacy_snapshot_prefixed_image_source_raises(tmp_path: Path) -> None:
     """Legacy services return docker_image="snapshot:<name>", which cbs auto-wraps
     into an ImageSource — the generator must refuse it like a real SnapshotSource
-    instead of emitting agent.image "snapshot:..." (found live against production
-    legal-research, which emitted snapshot:...-run-14 as a pullable ref)."""
+    instead of emitting "snapshot:..." as a pullable ref (found live against
+    production legal-research)."""
     legacy = RetrieveTaskResponse.model_validate({
         "docker_image": "snapshot:legal-research-runner-pkg-962a5e8-run-14",
         "cwd": "/workspace",
@@ -228,7 +209,7 @@ async def test_legacy_snapshot_prefixed_image_source_raises(tmp_path: Path) -> N
     contract_path = _make_contract(tmp_path)
 
     with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
-        with pytest.raises(ValueError, match="Daytona snapshot"):
+        with pytest.raises(ValueError, match="is not supported"):
             await generate_manifest(
                 client=client,
                 service_url="http://svc",
@@ -270,100 +251,15 @@ def test_cli_manifest_fails_on_snapshot(tmp_path: Path, monkeypatch: pytest.Monk
     )
 
     assert result.exit_code != 0
-    assert "Daytona snapshot" in result.output
+    assert "is not supported. Please contact Vals." in result.output
     assert not output_path.exists()
-
-
-# ---------------------------------------------------------------------------
-# Test 3: per-task images (different ImageSource per task)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_per_task_images(tmp_path: Path) -> None:
-    """Two tasks with different ImageSource → no shared agent.image; each task has its own image."""
-    source_a = ImageSource(image="registry.example.com/agent-a:1.0")
-    source_b = ImageSource(image="registry.example.com/agent-b:2.0")
-    client = FakeClient(
-        {
-            "task-1": _make_retrieve_response(source_a),
-            "task-2": _make_retrieve_response(source_b),
-        }
-    )
-    contract_path = _make_contract(tmp_path)
-
-    with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
-        manifest = await generate_manifest(
-            client=client,
-            service_url="http://svc",
-            dataset="my-dataset",
-            contract_path=contract_path,
-            benchmark="mybench",
-        )
-
-    # No shared agent image in per-task mode; problem_path is still emitted (agent-level)
-    assert manifest.agent.image is None
-    assert manifest.agent.problem_path == "/app/problem.txt"
-
-    # Each task carries its own image ref
-    task_map = {t.id: t for t in manifest.tasks}
-    assert task_map["task-1"].image == "registry.example.com/agent-a:1.0"
-    assert task_map["task-2"].image == "registry.example.com/agent-b:2.0"
-
-
-# ---------------------------------------------------------------------------
-# Test 4: shared source but differing resources → per-task branch (regression)
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_shared_source_different_resources_is_per_task(tmp_path: Path) -> None:
-    """Same ImageSource but different Resources → per-task branch.
-
-    This is the regression case for the shared-detection bug where only `source`
-    was compared: tasks would silently inherit the first task's resources.
-    """
-    source = ImageSource(image="registry.example.com/agent:1.0")
-    client = FakeClient(
-        {
-            "task-1": _make_retrieve_response(source, resources=Resources(vcpu=2, memory=4, disk=10)),
-            "task-2": _make_retrieve_response(source, resources=Resources(vcpu=4, memory=8, disk=20)),
-        }
-    )
-    contract_path = _make_contract(tmp_path)
-
-    with patch("benchmark_runner.sandbox.manifest._fetch_version", new=AsyncMock(return_value=None)):
-        manifest = await generate_manifest(
-            client=client,
-            service_url="http://svc",
-            dataset="my-dataset",
-            contract_path=contract_path,
-            benchmark="mybench",
-        )
-
-    # Must take per-task branch
-    assert manifest.agent.image is None
-    assert manifest.agent.resources is None
-
-    task_map = {t.id: t for t in manifest.tasks}
-    assert task_map["task-1"].resources == {"vcpu": 2, "memory": 4, "disk": 10}
-    assert task_map["task-2"].resources == {"vcpu": 4, "memory": 8, "disk": 20}
-    assert task_map["task-1"].image == "registry.example.com/agent:1.0"
-    assert task_map["task-2"].image == "registry.example.com/agent:1.0"
-
-
-# ---------------------------------------------------------------------------
-# Test 5: divergent problem_path → ValueError
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_divergent_problem_path_raises(tmp_path: Path) -> None:
-    """Tasks with different problem_path values must raise ValueError mentioning problem_path.
-
-    problem_path is emitted agent-level in both the shared and per-task branches,
-    so divergent values can't be represented in a manifest.
-    """
+    """Tasks with different problem_path values must raise ValueError mentioning
+    problem_path: it is emitted agent-level, so divergent per-task values can't
+    be represented in a manifest."""
     source = ImageSource(image="registry.example.com/agent:1.0")
     resp_a = RetrieveTaskResponse(
         source=source,
@@ -393,11 +289,6 @@ async def test_divergent_problem_path_raises(tmp_path: Path) -> None:
             )
 
 
-# ---------------------------------------------------------------------------
-# Test 6: empty dataset → ValueError
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_empty_dataset_raises(tmp_path: Path) -> None:
     """list_tasks returning zero tasks should raise ValueError with a clear message."""
@@ -416,11 +307,6 @@ async def test_empty_dataset_raises(tmp_path: Path) -> None:
                 contract_path=contract_path,
                 benchmark="mybench",
             )
-
-
-# ---------------------------------------------------------------------------
-# Test 7: client without _http_client → manifest with null versions
-# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -453,7 +339,5 @@ async def test_no_http_client_produces_null_versions(tmp_path: Path) -> None:
         benchmark="mybench",
     )
 
-    assert isinstance(manifest, Manifest)
     assert manifest.service.framework_version is None
     assert manifest.service.service_version is None
-    assert manifest.versions.benchmark_service is None

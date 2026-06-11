@@ -9,7 +9,7 @@ import yaml
 from dotenv import load_dotenv
 
 from benchmark_service.client import BenchmarkServiceClient
-from benchmark_service.sandbox.types import ImageSource, Resources
+from benchmark_service.sandbox.types import ImageSource
 
 from benchmark_runner.client import auth_headers
 from benchmark_runner.sandbox.contract import AgentContract
@@ -46,33 +46,17 @@ def _contract_from_manifest(mf: Manifest) -> AgentContract:
 
 
 def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
-    problem_path = mf.agent.problem_path
-    if problem_path is None:
-        click.echo(
-            "Warning: manifest has no agent.problem_path; falling back to service "
-            "retrieve/setup callbacks. Regenerate the manifest to enable manifest-native execution.",
-            err=True,
-        )
-    specs: dict[str, SandboxTaskSpec] = {}
-    for task in mf.tasks:
-        image = task.image or mf.agent.image
-        resources = task.resources or mf.agent.resources
-        cwd = task.cwd or mf.agent.cwd
-        if image is None:
-            raise click.ClickException(f"manifest task '{task.id}' has no image pin")
-        if resources is None:
-            raise click.ClickException(f"manifest task '{task.id}' has no resources pin")
-        if cwd is None:
-            raise click.ClickException(f"manifest task '{task.id}' has no cwd pin")
-        specs[task.id] = SandboxTaskSpec(
-            source=ImageSource(image=image),
-            resources=Resources.model_validate(resources),
-            cwd=cwd,
+    return {
+        task.id: SandboxTaskSpec(
+            source=ImageSource(image=task.image),
+            resources=task.resources,
+            cwd=task.cwd,
             agent_timeout=task.timeout,
-            question=task.question if problem_path is not None else None,
-            problem_path=problem_path,
+            question=task.question,
+            problem_path=mf.agent.problem_path,
         )
-    return specs
+        for task in mf.tasks
+    }
 
 
 @cli.command()
@@ -210,14 +194,20 @@ def manifest(
     click.echo(f"Manifest written to {output_path} ({len(mf.tasks)} tasks, benchmark={benchmark})")
 
 
-def _short_agent_ref(image: str | None) -> str:
+def _short_image_ref(image: str) -> str:
     """Compact display ref: digest-pinned images show only the first 12 digest chars."""
-    if image is None:
-        return "per-task"
     repo, sep, digest = image.partition("@sha256:")
     if sep:
         return f"{repo}@sha256:{digest[:12]}"
     return image
+
+
+def _image_summary(mf: Manifest) -> str:
+    """One short ref when every task shares an image, else the distinct-image count."""
+    images = {task.image for task in mf.tasks}
+    if len(images) == 1:
+        return _short_image_ref(images.pop())
+    return f"per-task ({len(images)} images)"
 
 
 @cli.command()
@@ -253,7 +243,7 @@ def add(manifest_path: Path) -> None:
     installed_path = install_manifest(mf)
     click.echo(f"Installed {mf.benchmark} -> {installed_path}")
     click.echo(f"  dataset: {mf.dataset.name} ({len(mf.tasks)} tasks)")
-    click.echo(f"  agent image: {mf.agent.image or 'per-task'}")
+    click.echo(f"  image: {_image_summary(mf)}")
     click.echo(f"  service version: {mf.service.service_version}, framework version: {mf.service.framework_version}")
 
 
@@ -267,7 +257,7 @@ def list_cmd() -> None:
     for mf in manifests:
         click.echo(
             f"{mf.benchmark}  dataset={mf.dataset.name} ({len(mf.tasks)} tasks)  "
-            f"agent={_short_agent_ref(mf.agent.image)}  service={mf.service.service_version}"
+            f"image={_image_summary(mf)}  service={mf.service.service_version}"
         )
 
 

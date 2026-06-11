@@ -9,7 +9,7 @@ import pytest
 
 from benchmark_service.sandbox import Resources, SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SnapshotSource
-from tests.sandbox.conftest import FakeClient, FakeExecResult, FakeProvider, FakeSandbox
+from tests.sandbox.conftest import FakeClient, FakeProvider, FakeSandbox
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_benchmark
 from benchmark_runner.sandbox.contract import AgentContract
@@ -188,69 +188,6 @@ async def test_run_benchmark_resume_skips_sandboxes(
     )
 
     assert second_provider.created == [], "resume should not create any new sandboxes"
-
-
-@pytest.mark.asyncio
-async def test_task_specs_override_live_retrieve_task_sandbox_pins(
-    tmp_path: Path,
-    contract_yaml: Path,
-) -> None:
-    """Manifest mode must run against installed pins, not drifted live retrieve_task env details."""
-
-    class RecordingSandbox(FakeSandbox):
-        def __init__(self, sandbox_id: str) -> None:
-            super().__init__(sandbox_id=sandbox_id)
-            self.commands: list[str] = []
-
-        async def exec(
-            self,
-            command: str,
-            *,
-            cwd: str | None = None,
-            timeout: float | None = None,
-        ) -> FakeExecResult:
-            self.commands.append(command)
-            return await super().exec(command, cwd=cwd, timeout=timeout)
-
-    class RecordingProvider(FakeProvider):
-        def __init__(self) -> None:
-            super().__init__()
-            self.last_sandbox: RecordingSandbox | None = None
-
-        async def create_sandbox(self, request: SandboxCreateRequest) -> RecordingSandbox:
-            self.created.append(request.name)
-            self.last_request = request
-            sandbox = RecordingSandbox(sandbox_id=f"sandbox-{request.name}")
-            self.last_sandbox = sandbox
-            return sandbox
-
-    provider = RecordingProvider()
-
-    await run_benchmark(
-        run_id="run-pins",
-        model="openai/gpt-5",
-        task_ids=["task-pinned"],
-        dataset=None,
-        results_dir=str(tmp_path),
-        contract_path=contract_yaml,
-        client=FakeClient(),
-        provider=provider,
-        task_specs={
-            "task-pinned": SandboxTaskSpec(
-                source=ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "a" * 64),
-                resources=Resources(vcpu=8, memory=16, disk=32),
-                cwd="/pinned",
-                agent_timeout=5.0,
-            )
-        },
-    )
-
-    assert provider.last_request is not None
-    assert provider.last_request.source == ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "a" * 64)
-    assert provider.last_request.resources == Resources(vcpu=8, memory=16, disk=32)
-    assert provider.last_sandbox is not None
-    assert any(command.startswith("cd /pinned &&") for command in provider.last_sandbox.commands)
-    assert any("timeout -k 10 5" in command for command in provider.last_sandbox.commands)
 
 
 @pytest.mark.asyncio
@@ -679,9 +616,10 @@ async def test_local_mode_skips_service_calls_and_uploads_question(
     tmp_path: Path,
     contract_yaml: Path,
 ) -> None:
-    """Local mode (spec has question + problem_path) must never call retrieve_task or
-    setup_task — the service cannot reach lab/local sandboxes — and must upload the
-    question bytes to problem_path in the sandbox before generation."""
+    """Manifest-native mode (a spec exists for the task) must never call
+    retrieve_task or setup_task — the service cannot reach lab/local sandboxes —
+    must boot the sandbox from the spec's pins (not drifted live service values),
+    and must upload the question bytes to problem_path before generation."""
     client = FakeClient()
     provider = FakeProvider()
 
@@ -696,9 +634,9 @@ async def test_local_mode_skips_service_calls_and_uploads_question(
         provider=provider,
         task_specs={
             "task-local": SandboxTaskSpec(
-                source=ImageSource(image="ghcr.io/vals-ai/agent@sha256:" + "b" * 64),
-                resources=Resources(vcpu=2, memory=4, disk=10),
-                cwd="/app",
+                source=ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "b" * 64),
+                resources=Resources(vcpu=8, memory=16, disk=32),
+                cwd="/pinned",
                 agent_timeout=30.0,
                 question="What is 2+2?",
                 problem_path="/app/problem.txt",
@@ -706,12 +644,20 @@ async def test_local_mode_skips_service_calls_and_uploads_question(
         },
     )
 
-    # Service calls must never happen in local mode
+    # Service calls must never happen in manifest-native mode
     assert client.retrieve_task_call_count == 0, "retrieve_task must not be called in local mode"
     assert client.setup_task_call_count == 0, "setup_task must not be called in local mode"
 
-    # The question must be uploaded to the sandbox at problem_path
+    # The sandbox boots from the spec's pins, which differ from everything the
+    # (never-consulted) FakeClient.retrieve_task would have returned
+    assert provider.last_request is not None
+    assert provider.last_request.source == ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "b" * 64)
+    assert provider.last_request.resources == Resources(vcpu=8, memory=16, disk=32)
     assert provider.last_sandbox is not None
+    assert any(command.startswith("cd /pinned &&") for command in provider.last_sandbox.commands)
+    assert any("timeout -k 10 30" in command for command in provider.last_sandbox.commands)
+
+    # The question must be uploaded to the sandbox at problem_path
     assert provider.last_sandbox.uploads == [("/app/problem.txt", b"What is 2+2?")]
 
     # Generation must succeed through the normal pipeline
