@@ -13,44 +13,42 @@ from tests.sandbox.conftest import FakeClient, FakeProvider, FakeSandbox
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_sandbox
 from benchmark_runner.sandbox.contract import AgentContract
-from benchmark_runner.sandbox.orchestrator import _normalize_source, _resolve_secret_env
+from benchmark_runner.sandbox.orchestrator import _require_image_source, _resolve_secret_env
 from benchmark_runner.schemas import EvalResult, EvalStatus, GenerationResult, GenerationStatus, ScoreResult
 
 
-def test_normalize_source_converts_legacy_snapshot_prefix() -> None:
-    """A legacy `docker_image="snapshot:NAME"` (wrapped as ImageSource by cbs) must
-    become a SnapshotSource, else Daytona tries to pull "snapshot:NAME" as an image."""
-    out = _normalize_source(ImageSource(image="snapshot:legal-research-runner-pkg-962a5e8-run-14"))
-    assert isinstance(out, SnapshotSource)
-    assert out.snapshot == "legal-research-runner-pkg-962a5e8-run-14"
-
-
-def test_normalize_source_passes_through_real_image() -> None:
-    out = _normalize_source(ImageSource(image="ghcr.io/vals-ai/x@sha256:abc"))
-    assert isinstance(out, ImageSource)
+def test_require_image_source_accepts_only_registry_images() -> None:
+    """Snapshots are unsupported: SnapshotSource and legacy `snapshot:`-prefixed
+    image refs (cbs wraps the legacy string field into an ImageSource) are rejected
+    with a clear error instead of surfacing as a failed image pull."""
+    out = _require_image_source(ImageSource(image="ghcr.io/vals-ai/x@sha256:abc"))
     assert out.image == "ghcr.io/vals-ai/x@sha256:abc"
+    with pytest.raises(ValueError, match="snapshots are not supported"):
+        _require_image_source(SnapshotSource(snapshot="legal-research-runner-pkg-0.1.6"))
+    with pytest.raises(ValueError, match="snapshots are not supported"):
+        _require_image_source(ImageSource(image="snapshot:legal-research-runner-pkg-962a5e8-run-14"))
 
 
-def test_normalize_source_rejects_empty_snapshot_name() -> None:
-    with pytest.raises(ValueError, match="snapshot name"):
-        _normalize_source(ImageSource(image="snapshot:"))
-
-
-def test_resolve_secret_env_injects_only_declared_and_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Only contract-declared secrets that exist in the env are injected; undeclared
-    env (e.g. VALS_AUTH_KEY) never leaks into the sandbox, and absent ones are skipped."""
+def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Contract-declared secrets are injected from the env; undeclared env
+    (e.g. VALS_AUTH_KEY) never leaks into the sandbox; a declared name missing
+    from the env fails the run up front rather than producing a sandbox that
+    errors later."""
     monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
+    monkeypatch.setenv("TAVILY_API_KEY", "t-key")
     monkeypatch.setenv("VALS_AUTH_KEY", "should-not-leak")
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     contract = AgentContract(
         name="x",
         run_cmd="a --problem {problem_statement_path}",
         secrets={"GOOGLE_API_KEY": "ref1", "TAVILY_API_KEY": "ref2"},
     )
     env = _resolve_secret_env(contract)
-    assert env == {"GOOGLE_API_KEY": "g-key"}  # present+declared only
+    assert env == {"GOOGLE_API_KEY": "g-key", "TAVILY_API_KEY": "t-key"}
     assert "VALS_AUTH_KEY" not in env  # undeclared env not leaked
-    assert "TAVILY_API_KEY" not in env  # declared but absent → skipped, not empty
+
+    monkeypatch.delenv("TAVILY_API_KEY")
+    with pytest.raises(ValueError, match="TAVILY_API_KEY"):
+        _resolve_secret_env(contract)
 
 
 @pytest.mark.asyncio

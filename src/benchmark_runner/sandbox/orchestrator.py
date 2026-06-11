@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from benchmark_service.sandbox import SandboxCreateRequest
-from benchmark_service.sandbox.types import ImageSource, SandboxSource, SnapshotSource
+from benchmark_service.sandbox.types import ImageSource, SandboxSource
 
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
@@ -24,23 +24,20 @@ from benchmark_runner.schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Legacy benchmark services (e.g. legal-research on framework 0.6.1) return the
-# sandbox source as the string field `docker_image="snapshot:<name>"`. cbs's
-# RetrieveTaskResponse.parse_legacy_fields blindly wraps that into an ImageSource,
-# so the "snapshot:" prefix survives as a bogus image ref that Daytona would try
-# to PULL. Valkyrie's tracker special-cases this prefix; mirror that here so the
-# orchestrator boots snapshot-based benchmarks instead of failing on an image pull.
-_SNAPSHOT_IMAGE_PREFIX = "snapshot:"
+def _require_image_source(source: SandboxSource) -> ImageSource:
+    """Only pullable registry images are supported as sandbox sources.
 
-
-def _normalize_source(source: SandboxSource) -> SandboxSource:
-    """Reinterpret an ImageSource carrying the legacy ``snapshot:`` prefix as a SnapshotSource."""
-    if isinstance(source, ImageSource) and source.image.startswith(_SNAPSHOT_IMAGE_PREFIX):
-        snapshot_name = source.image[len(_SNAPSHOT_IMAGE_PREFIX):].strip()
-        if not snapshot_name:
-            raise ValueError(f"snapshot-based source has no snapshot name: {source.image!r}")
-        return SnapshotSource(snapshot=snapshot_name)
-    return source
+    Daytona snapshots are Vals-internal and unusable for lab-hosted sandboxes, so
+    a SnapshotSource — or a legacy service returning the string
+    ``docker_image="snapshot:<name>"``, which cbs wraps into an ImageSource — is
+    rejected with a clear error instead of surfacing as a failed image pull.
+    """
+    if isinstance(source, ImageSource) and not source.image.startswith("snapshot:"):
+        return source
+    raise ValueError(
+        f"unsupported sandbox source {source!r}: the service must return a pullable "
+        "registry image (snapshots are not supported)"
+    )
 
 
 def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
@@ -50,8 +47,9 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
     Production (Valkyrie) resolves the contract's `secrets:` map from a secret
     manager; the pilot passes them through the orchestrator env instead. Keying
     on the contract means unrelated orchestrator env (SERVICE_URL, VALS_AUTH_KEY,
-    Daytona creds) never leaks into the agent sandbox. Names absent from the env
-    are skipped (and logged) rather than injected empty.
+    Daytona creds) never leaks into the agent sandbox. A declared name missing
+    from the env is an error: the contract declares what the agent needs, and a
+    sandbox without it would only fail later in a harder-to-diagnose way.
     """
     env: dict[str, str] = {}
     missing: list[str] = []
@@ -62,10 +60,9 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
         else:
             missing.append(var_name)
     if missing:
-        logger.warning(
-            "contract declares %d secret(s) not in the orchestrator env (skipped): %s",
-            len(missing),
-            ", ".join(sorted(missing)),
+        raise ValueError(
+            "contract declares secret(s) not set in the orchestrator env: "
+            + ", ".join(sorted(missing))
         )
     return env
 
@@ -106,19 +103,18 @@ async def run_sandbox(
     client: BenchmarkServiceClientLike,
     provider: SandboxProviderLike | None = None,
     parallelism: int = 10,
-    source_override: SandboxSource | None = None,
+    source_override: ImageSource | None = None,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
     Handles resume: skips generation/eval if valid artifacts already exist.
 
-    source_override: when set, boot every sandbox from this source instead of the
+    source_override: when set, boot every sandbox from this image instead of the
     one retrieve_task returns. Eval is text-based (the generation string is sent to
     the service judge, not the sandbox), so this lets you point generation at a
     different/known-good agent image while still using the service's real dataset
-    and rubric eval — e.g. to validate a candidate snapshot before repointing the
-    deployed service. The retrieve_task source's `snapshot:` prefix is still honored
-    for the default path.
+    and rubric eval — e.g. to validate a candidate agent build before repointing
+    the deployed service.
     """
     if parallelism < 1:
         raise ValueError(f"parallelism must be >= 1, got {parallelism}")
@@ -173,7 +169,7 @@ async def run_sandbox(
         try:
             td = await client.retrieve_task(task_id=tid, dataset=dataset)
             req = SandboxCreateRequest(
-                source=source_override if source_override is not None else _normalize_source(td.source),
+                source=source_override if source_override is not None else _require_image_source(td.source),
                 resources=td.resources,
                 name=f"{run_id}-{tid}",
                 labels={},

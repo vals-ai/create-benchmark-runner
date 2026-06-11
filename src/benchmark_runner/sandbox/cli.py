@@ -8,7 +8,7 @@ import click
 from dotenv import load_dotenv
 
 from benchmark_service.client import BenchmarkServiceClient
-from benchmark_service.sandbox.types import ImageSource, SnapshotSource
+from benchmark_service.sandbox.types import ImageSource
 
 from benchmark_runner.client import auth_headers
 from benchmark_runner.sandbox.orchestrator import run_sandbox
@@ -27,8 +27,7 @@ def cli() -> None:
 @click.option("--results-dir", default="results", help="Results output directory")
 @click.option("--service-url", default=None, help="Benchmark service URL (falls back to $SERVICE_URL)")
 @click.option("--parallelism", default=10, type=int, help="Number of concurrent tasks")
-@click.option("--snapshot", default=None, help="Override: boot every sandbox from this Daytona snapshot (e.g. to validate a candidate agent build) instead of the source retrieve_task returns. Eval still uses the service. Mutually exclusive with --image.")
-@click.option("--image", default=None, help="Override: boot every sandbox from this registry image instead of the source retrieve_task returns. Mutually exclusive with --snapshot.")
+@click.option("--image", default=None, help="Override: boot every sandbox from this registry image (e.g. to validate a candidate agent build) instead of the source retrieve_task returns. Eval still uses the service.")
 @click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for service calls incl. the eval judge. Default 1800; the rubric judge can take minutes, and the 60s client default times out (httpx.ReadTimeout) on slow tasks.")
 @click.argument("task_ids", nargs=-1)
 def run(
@@ -39,7 +38,6 @@ def run(
     results_dir: str,
     service_url: str | None,
     parallelism: int,
-    snapshot: str | None,
     image: str | None,
     eval_timeout: int,
     task_ids: tuple[str, ...],
@@ -47,13 +45,7 @@ def run(
     """Run the sandbox orchestrator against one or more tasks."""
     if not task_ids:
         raise click.UsageError("At least one TASK_ID is required.")
-    if snapshot and image:
-        raise click.UsageError("--snapshot and --image are mutually exclusive.")
-    source_override = None
-    if snapshot:
-        source_override = SnapshotSource(snapshot=snapshot)
-    elif image:
-        source_override = ImageSource(image=image)
+    source_override = ImageSource(image=image) if image else None
 
     # Resolve after the group callback's load_dotenv so a .env-only SERVICE_URL is honored.
     service_url = service_url or os.environ.get("SERVICE_URL", "")
