@@ -169,7 +169,6 @@ async def _wait_until(predicate, *, timeout: float = 2.0) -> None:
 
 
 def test_command_matches_daytona_order():
-    # timeout wraps first (inner), cwd prepends second (outer) — same as cbs _command.
     assert _command("run x", "/app", 5) == "cd /app && timeout 5 run x"
     assert _command("run x", None, None) == "run x"
     assert _command("run x", "/w", None) == "cd /w && run x"
@@ -201,17 +200,12 @@ async def test_create_sandbox_boots_keepalive_container():
     assert run_call["image"] == "img:tag"
     assert run_call["detach"] is True
     assert run_call["name"] == "r1-t1"
-    # entrypoint/command split: command replaces the image CMD; a combined
-    # entrypoint would get the image CMD appended as bogus extra args to tail.
     assert run_call["entrypoint"] == ["tail"]
     assert run_call["command"] == ["-f", "/dev/null"]
-    # provider label (so cleanup/list find it) plus the request's labels
     assert run_call["labels"] == {_PROVIDER_LABEL: "", "k": "v"}
-    # extra_env merged in, request env_vars winning on conflict
     assert run_call["environment"] == {"FOO": "bar", "EXTRA": "1"}
     assert run_call["nano_cpus"] == 2_000_000_000
     assert run_call["mem_limit"] == "4g"
-    # the sh preflight ran against the new container
     assert container.exec_calls == [(["sh", "-c", "true"], False)]
 
 
@@ -242,8 +236,6 @@ async def test_create_sandbox_pulls_image_only_when_missing():
 
 
 async def test_create_sandbox_diagnoses_exited_container():
-    # A container that is not running right after create means the image lacks
-    # the keep-alive binary; the error must say so rather than fail later.
     container = FakeContainer(status="exited")
     client = FakeDockerClient(containers=FakeContainers(run_result=container))
     with pytest.raises(SandboxError, match="tail"):
@@ -292,8 +284,6 @@ async def test_timeout_cleanup_ignores_cancelled_create_task():
 
 
 async def test_exec_joins_demuxed_streams_with_newline():
-    # `backend.generate` surfaces output as the error text on nonzero exit, so
-    # stderr must be present in it; the newline keeps the streams readable.
     container = FakeContainer(exec_outcomes=[(1, (b"out", b"err"))])
     res = await _sandbox(container).exec("boom")
     assert isinstance(res, ExecResult)
@@ -305,7 +295,6 @@ async def test_exec_joins_demuxed_streams_with_newline():
 async def test_exec_handles_stderr_only_and_propagates_exit_code():
     container = FakeContainer(exec_outcomes=[(124, (None, b"timed out"))])
     res = await _sandbox(container).exec("slow")
-    # 124 must pass through untouched — it classifies the task as MAX_TIME upstream.
     assert res.exit_code == 124
     assert res.output == "timed out"
 
@@ -340,8 +329,6 @@ async def test_upload_file_archives_file_with_ancestor_dirs():
 
 async def test_upload_file_rejects_relative_path_and_failed_put():
     container = FakeContainer(put_archive_ok=False)
-    # Docker's archive API and exec'd commands resolve relative paths against
-    # different bases (/ vs WORKDIR), so relative paths are rejected outright.
     with pytest.raises(SandboxError, match="absolute"):
         await _sandbox(container).upload_file("results/x.json", b"x")
     assert container.put_archive_calls == []
@@ -364,8 +351,6 @@ async def test_download_file_extracts_bytes():
 
 
 async def test_download_file_raises_when_missing():
-    # Must raise (not return empty): `backend.generate` relies on this to
-    # classify a missing generation.json as ERROR.
     container = FakeContainer(archive=None)
     with pytest.raises(SandboxError, match="download_file failed"):
         await _sandbox(container).download_file("/app/missing.json")
@@ -384,7 +369,7 @@ async def test_delete_sandbox_is_idempotent():
     provider = _provider(client)
     await provider.delete_sandbox("cid")
     assert client.containers.existing["cid"].removed
-    await provider.delete_sandbox("never-existed")  # NotFound is not an error
+    await provider.delete_sandbox("never-existed")
 
 
 async def test_delete_sandbox_refuses_unowned_container():

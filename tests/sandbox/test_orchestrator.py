@@ -380,7 +380,7 @@ async def test_none_fill_in_final_score_when_eval_missing(
     client = FakeClient()
     provider = FakeProvider()
 
-    # First run to seed task-good's generation so it's not redoable
+    # Seed task-nofs so this test exercises an eval persistence failure.
     artifacts = RunArtifacts(results_dir=str(tmp_path), run_id=run_id)
     artifacts.save_generation(
         "task-nofs",
