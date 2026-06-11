@@ -1,4 +1,4 @@
-"""Behavioral tests for run_sandbox orchestrator loop (TDD)."""
+"""Behavioral tests for run_benchmark orchestrator loop (TDD)."""
 
 import asyncio
 import json
@@ -11,7 +11,7 @@ from benchmark_service.sandbox import SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SnapshotSource
 from tests.sandbox.conftest import FakeClient, FakeProvider, FakeSandbox
 from benchmark_runner.artifacts import RunArtifacts
-from benchmark_runner.sandbox import run_sandbox
+from benchmark_runner.sandbox import run_benchmark
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.sandbox.orchestrator import _require_image_source, _resolve_secret_env
 from benchmark_runner.schemas import EvalResult, EvalStatus, GenerationResult, GenerationStatus, ScoreResult
@@ -52,7 +52,7 @@ def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_run_sandbox_produces_artifacts_and_score(
+async def test_run_benchmark_produces_artifacts_and_score(
     tmp_path: Path,
     contract_yaml: Path,
 ) -> None:
@@ -62,7 +62,7 @@ async def test_run_sandbox_produces_artifacts_and_score(
     client = FakeClient()
     provider = FakeProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -95,7 +95,7 @@ async def test_run_sandbox_produces_artifacts_and_score(
 
 
 @pytest.mark.asyncio
-async def test_run_sandbox_resume_skips_sandboxes(
+async def test_run_benchmark_resume_skips_sandboxes(
     tmp_path: Path,
     contract_yaml: Path,
 ) -> None:
@@ -105,7 +105,7 @@ async def test_run_sandbox_resume_skips_sandboxes(
     client = FakeClient()
 
     first_provider = FakeProvider()
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -119,7 +119,7 @@ async def test_run_sandbox_resume_skips_sandboxes(
 
     # Second pass — inject a fresh provider to detect any new sandbox creation
     second_provider = FakeProvider()
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -156,7 +156,7 @@ async def test_subset_resume_scores_against_run_config_tasks(
     )
     artifacts.save_eval("task-a", EvalResult(task_id="task-a", status=EvalStatus.EVALUATED))
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=["task-a"],
@@ -209,7 +209,7 @@ async def test_eval_runs_outside_sandbox_semaphore(
     client = GatedEvalClient()
     provider = SignalingProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id="run-sem",
         model="openai/gpt-5",
         task_ids=["task-a", "task-b"],
@@ -258,7 +258,7 @@ async def test_eval_status_mapping(
         GenerationResult(task_id="task-max-turns", status=GenerationStatus.MAX_TURNS, data=""),
     )
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=["task-max-time", "task-max-turns", "task-infra-fail"],
@@ -295,7 +295,7 @@ async def test_partial_resume_runs_eval_only(
     )
 
     provider = FakeProvider()
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -342,7 +342,7 @@ async def test_setup_task_failure_deletes_sandbox_and_records_error(
     client = FailingSetupClient()
     provider = FakeProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -393,7 +393,7 @@ async def test_none_fill_in_final_score_when_eval_missing(
     task_nofs_dir.chmod(stat.S_IRUSR | stat.S_IXUSR)  # read + execute, no write
 
     try:
-        await run_sandbox(
+        await run_benchmark(
             run_id=run_id,
             model="openai/gpt-5",
             task_ids=task_ids,
@@ -432,7 +432,7 @@ async def test_delete_sandbox_failure_preserves_generation_result(
     client = FakeClient()
     provider = FailingDeleteProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -461,7 +461,7 @@ async def test_final_score_complete_flag_happy_path(
     client = FakeClient()
     provider = FakeProvider()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -492,7 +492,7 @@ async def test_final_score_complete_flag_with_generation_error(
     task_ids = ["task-fail"]
     client = FakeClient()
 
-    await run_sandbox(
+    await run_benchmark(
         run_id=run_id,
         model="openai/gpt-5",
         task_ids=task_ids,
@@ -515,7 +515,7 @@ async def test_parallelism_zero_raises(
 ) -> None:
     """parallelism < 1 must raise ValueError before any work begins."""
     with pytest.raises(ValueError, match="parallelism"):
-        await run_sandbox(
+        await run_benchmark(
             run_id="run-zero",
             model="openai/gpt-5",
             task_ids=["task-x"],
@@ -541,7 +541,7 @@ async def test_missing_final_output_raises_before_any_sandbox(
     )
     provider = FakeProvider()
     with pytest.raises(ValueError, match="final_output"):
-        await run_sandbox(
+        await run_benchmark(
             run_id="run-noout",
             model="openai/gpt-5",
             task_ids=["task-x"],

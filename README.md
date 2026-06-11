@@ -191,9 +191,9 @@ The orchestrator loop itself uses a narrow core of that interface. Implement the
 Wire it in programmatically (the CLI builds the default Daytona provider):
 
 ```python
-from benchmark_runner.sandbox.orchestrator import run_sandbox
+from benchmark_runner.sandbox.orchestrator import run_benchmark
 
-await run_sandbox(..., provider=MyProvider())
+await run_benchmark(..., provider=MyProvider())
 ```
 
 ## Development

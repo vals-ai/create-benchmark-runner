@@ -74,7 +74,7 @@ SANDBOX_AUTO_STOP_INTERVAL = 30
 SANDBOX_CREATE_TIMEOUT = 600  # seconds to wait for sandbox readiness
 
 
-async def run_sandbox(
+async def run_benchmark(
     *,
     run_id: str,
     model: str,
@@ -256,4 +256,4 @@ async def run_sandbox(
     artifacts.save_final_score(score)
 
 
-__all__ = ["run_sandbox"]
+__all__ = ["run_benchmark"]

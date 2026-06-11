@@ -11,7 +11,7 @@ from benchmark_service.client import BenchmarkServiceClient
 from benchmark_service.sandbox.types import ImageSource
 
 from benchmark_runner.client import auth_headers
-from benchmark_runner.sandbox.orchestrator import run_sandbox
+from benchmark_runner.sandbox.orchestrator import run_benchmark
 
 
 @click.group()
@@ -66,7 +66,7 @@ def run(
     client = BenchmarkServiceClient(service_url, headers=headers, timeout=eval_timeout)
 
     asyncio.run(
-        run_sandbox(
+        run_benchmark(
             run_id=run_id,
             model=model,
             task_ids=list(task_ids),

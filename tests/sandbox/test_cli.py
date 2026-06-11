@@ -20,15 +20,15 @@ def contract_file(tmp_path: Path) -> str:
     return str(p)
 
 
-def test_run_maps_args_to_run_sandbox(contract_file: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    """CLI args are forwarded correctly to run_sandbox."""
+def test_run_maps_args_to_run_benchmark(contract_file: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """CLI args are forwarded correctly to run_benchmark."""
     calls: list[dict] = []
 
-    async def fake_run_sandbox(**kwargs) -> None:  # type: ignore[return]
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
         calls.append(kwargs)
 
     fake_client = MagicMock()
-    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_sandbox", fake_run_sandbox)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
     monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: fake_client)
 
     runner = CliRunner()
