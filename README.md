@@ -176,7 +176,7 @@ class SandboxProvider(ABC):
 
 Failures are reported through `SandboxError` and its subtypes (`SandboxNotFoundError`, `SandboxCommandError(exit_code)`), also in `benchmark_service.sandbox.types`.
 
-Reference implementation: `src/benchmark_runner/sandbox/local_docker.py` — a Daytona-free provider that runs sandboxes as local Docker containers, in ~270 lines.
+Reference implementation: `src/benchmark_runner/sandbox/local_docker.py` — a Daytona-free provider that runs sandboxes as local Docker containers.
 
 The orchestrator loop itself uses a narrow core of that interface. Implement these exactly; the rest of the ABC matters for service-side setup and tooling, not the loop:
 

@@ -571,7 +571,8 @@ def test_run_resume_restores_file_backed_dataset_file(tmp_path, monkeypatch):
         PAYLOAD_SCHEMA_VERSION = 1
         GENERATION_VERSION_ENV = "TEST_BENCH_GENERATION_VERSION"
 
-        def load_tasks(self, dataset_file):
+        def load_tasks(self, dataset_file: str | None) -> list[Task]:
+            assert dataset_file is not None
             loaded_files.append(dataset_file)
             data = json.loads(Path(dataset_file).read_text())
             return [Task(id=t["id"], question=t["question"]) for t in data["tests"]]
