@@ -43,14 +43,9 @@ def _require_image_source(source: SandboxSource) -> ImageSource:
 
 def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
     """Resolve the contract's declared secret env-var names from the orchestrator's
-    own environment, injecting only those the agent needs into the sandbox.
-
-    Production (Valkyrie) resolves the contract's `secrets:` map from a secret
-    manager; the pilot passes them through the orchestrator env instead. Keying
-    on the contract means unrelated orchestrator env (SERVICE_URL, VALS_AUTH_KEY,
-    Daytona creds) never leaks into the agent sandbox. A declared name missing
-    from the env is an error: the contract declares what the agent needs, and a
-    sandbox without it would only fail later in a harder-to-diagnose way.
+    own environment. Keying on the contract keeps unrelated orchestrator env
+    (SERVICE_URL, Daytona creds) out of the sandbox; a declared name missing from
+    the env is an error, since the agent would only fail later without it.
     """
     env: dict[str, str] = {}
     missing: list[str] = []
@@ -105,14 +100,11 @@ async def run_benchmark(
         provider = client.get_sandbox_provider()
 
     contract = AgentContract.from_yaml(Path(contract_path))
-    # Validate up front: without final_output the backend cannot read any result,
-    # so failing here beats booting a sandbox per task just to error.
+    # Without final_output there is no result file to read; fail before booting sandboxes.
     if contract.final_output is None:
         raise ValueError("contract.final_output is not set; no generation file to read")
     contract = contract.model_copy(update={"run_cmd": format_run_cmd(contract.run_cmd, {"model": model})})
-    # Resolve the contract's declared secrets once (constant across tasks) and
-    # inject them into every sandbox so the agent can reach its model/tools.
-    secret_env = _resolve_secret_env(contract)
+    secret_env = _resolve_secret_env(contract)  # constant across tasks
 
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     config = artifacts.load_run_config()
@@ -135,10 +127,9 @@ async def run_benchmark(
     sem = asyncio.Semaphore(parallelism)
 
     async def _run_task(tid: str) -> None:
-        # The semaphore bounds sandbox concurrency, so it gates generation only —
-        # eval is an HTTP call to the service judge (can take minutes) and holding
-        # a sandbox slot through it would throttle throughput. Mirrors cli.py,
-        # which holds gen_sem around generation only.
+        # The semaphore gates generation only: eval is an HTTP call to the service
+        # judge (can take minutes) and holding a sandbox slot through it would
+        # throttle throughput.
         async with sem:
             await _process_generation(tid)
         await _process_eval(tid)
@@ -241,8 +232,8 @@ async def run_benchmark(
             gen_errors += 1
         elif ev.status == EvalStatus.ERROR:
             eval_errors += 1
-    # Mirror cli.py: complete iff no missing evals and no generation/eval errors.
-    # DID_NOT_COMPLETE (timed-out tasks) does NOT break completeness.
+    # Complete iff no missing evals and no generation/eval errors; DID_NOT_COMPLETE
+    # (timed-out tasks) does not break completeness.
     complete = missing == 0 and gen_errors == 0 and eval_errors == 0
 
     resp = await client.final_score(submitted, dataset=dataset)
