@@ -1,19 +1,7 @@
 """Local Docker implementation of the create-benchmark-service sandbox ABCs.
 
 Lets the sandbox orchestrator run against containers on the local Docker daemon
-instead of Daytona — the "test without Daytona" path. It implements the same
-``benchmark_service.sandbox`` ``SandboxProvider`` / ``Sandbox`` interface that
-``DaytonaSandbox`` does, so ``run_benchmark(provider=LocalDockerSandboxProvider())``
-is a drop-in. Built on docker-py (no Daytona SDK); requires a reachable local
-Docker daemon.
-
-Image requirements: containers are kept alive with ``tail -f /dev/null`` and
-commands run under ``sh -c``, so the image must contain ``tail`` and a POSIX
-``sh`` — distroless/scratch images are unsupported. Container paths must be
-absolute. CPU and memory limits are mapped to Docker limits; disk limits and
-auto-stop have no faithful local equivalent and are intentionally ignored.
-Snapshots are rejected outright. This is a local test/dev harness, not a
-production sandbox.
+instead of Daytona; requires a reachable local Docker daemon.
 """
 
 from __future__ import annotations
