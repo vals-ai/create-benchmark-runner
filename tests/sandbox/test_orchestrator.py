@@ -7,13 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from benchmark_service.sandbox import SandboxCreateRequest
+from benchmark_service.sandbox import Resources, SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, SnapshotSource
 from tests.sandbox.conftest import FakeClient, FakeProvider, FakeSandbox
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.sandbox import run_benchmark
 from benchmark_runner.sandbox.contract import AgentContract
-from benchmark_runner.sandbox.orchestrator import _require_image_source, _resolve_secret_env
+from benchmark_runner.sandbox.orchestrator import SandboxTaskSpec, _require_image_source, _resolve_secret_env
 from benchmark_runner.schemas import EvalResult, EvalStatus, GenerationResult, GenerationStatus, ScoreResult
 
 
@@ -37,6 +37,8 @@ def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: 
     monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
     monkeypatch.setenv("TAVILY_API_KEY", "t-key")
     monkeypatch.setenv("VALS_AUTH_KEY", "should-not-leak")
+    monkeypatch.delenv("CUSTOM_ENDPOINT", raising=False)
+    monkeypatch.delenv("CUSTOM_API_KEY", raising=False)
     contract = AgentContract(
         name="x",
         run_cmd="a --problem {problem_statement_path}",
@@ -49,6 +51,61 @@ def test_resolve_secret_env_injects_declared_and_raises_on_missing(monkeypatch: 
     monkeypatch.delenv("TAVILY_API_KEY")
     with pytest.raises(ValueError, match="TAVILY_API_KEY"):
         _resolve_secret_env(contract)
+
+
+def test_resolve_secret_env_forwards_byo_endpoint_vars(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CUSTOM_ENDPOINT/CUSTOM_API_KEY are forwarded into the sandbox whenever set,
+    independent of the contract, so a lab can point generation at its own model
+    endpoint without editing any agent's contract.secrets."""
+    monkeypatch.setenv("CUSTOM_ENDPOINT", "https://my-model.internal/v1")
+    monkeypatch.setenv("CUSTOM_API_KEY", "sk-lab")
+    contract = AgentContract(name="x", run_cmd="a --problem {problem_statement_path}", secrets={})
+    env = _resolve_secret_env(contract)
+    assert env == {"CUSTOM_ENDPOINT": "https://my-model.internal/v1", "CUSTOM_API_KEY": "sk-lab"}
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_contract_param(tmp_path: Path, contract_yaml: Path) -> None:
+    """An in-memory contract (manifest mode) runs without a contract.yaml on disk;
+    exactly one of contract / contract_path must be provided."""
+    contract = AgentContract.from_yaml(contract_yaml)
+
+    with pytest.raises(ValueError, match="exactly one"):
+        await run_benchmark(
+            run_id="run-mem",
+            model="openai/gpt-5",
+            task_ids=["task-a"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            client=FakeClient(),
+            provider=FakeProvider(),
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        await run_benchmark(
+            run_id="run-mem",
+            model="openai/gpt-5",
+            task_ids=["task-a"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            contract=contract,
+            contract_path=contract_yaml,
+            client=FakeClient(),
+            provider=FakeProvider(),
+        )
+
+    await run_benchmark(
+        run_id="run-mem",
+        model="openai/gpt-5",
+        task_ids=["task-a"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract=contract,
+        client=FakeClient(),
+        provider=FakeProvider(),
+    )
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="run-mem")
+    gen = artifacts.load_generation("task-a")
+    assert gen is not None and gen.status == GenerationStatus.SUCCESS
 
 
 @pytest.mark.asyncio
@@ -552,3 +609,58 @@ async def test_missing_final_output_raises_before_any_sandbox(
             provider=provider,
         )
     assert provider.created == []
+
+
+@pytest.mark.asyncio
+async def test_local_mode_skips_service_calls_and_uploads_question(
+    tmp_path: Path,
+    contract_yaml: Path,
+) -> None:
+    """Manifest-native mode (a spec exists for the task) must never call
+    retrieve_task or setup_task — the service cannot reach lab/local sandboxes —
+    must boot the sandbox from the spec's pins (not drifted live service values),
+    and must upload the question bytes to problem_path before generation."""
+    client = FakeClient()
+    provider = FakeProvider()
+
+    await run_benchmark(
+        run_id="run-local",
+        model="openai/gpt-5",
+        task_ids=["task-local"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract=AgentContract.from_yaml(contract_yaml),
+        client=client,
+        provider=provider,
+        task_specs={
+            "task-local": SandboxTaskSpec(
+                source=ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "b" * 64),
+                resources=Resources(vcpu=8, memory=16, disk=32),
+                cwd="/pinned",
+                agent_timeout=30.0,
+                question="What is 2+2?",
+                problem_path="/app/problem.txt",
+            )
+        },
+    )
+
+    # Service calls must never happen in manifest-native mode
+    assert client.retrieve_task_call_count == 0, "retrieve_task must not be called in local mode"
+    assert client.setup_task_call_count == 0, "setup_task must not be called in local mode"
+
+    # The sandbox boots from the spec's pins, which differ from everything the
+    # (never-consulted) FakeClient.retrieve_task would have returned
+    assert provider.last_request is not None
+    assert provider.last_request.source == ImageSource(image="ghcr.io/vals-ai/pinned@sha256:" + "b" * 64)
+    assert provider.last_request.resources == Resources(vcpu=8, memory=16, disk=32)
+    assert provider.last_sandbox is not None
+    assert any(command.startswith("cd /pinned &&") for command in provider.last_sandbox.commands)
+    assert any("timeout -k 10 30" in command for command in provider.last_sandbox.commands)
+
+    # The question must be uploaded to the sandbox at problem_path
+    assert provider.last_sandbox.uploads == [("/app/problem.txt", b"What is 2+2?")]
+
+    # Generation must succeed through the normal pipeline
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="run-local")
+    gen = artifacts.load_generation("task-local")
+    assert gen is not None and gen.status == GenerationStatus.SUCCESS

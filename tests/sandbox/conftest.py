@@ -7,7 +7,52 @@ import pytest
 
 from benchmark_service.sandbox import ImageSource, Resources, SandboxCreateRequest
 from benchmark_service.schemas import FinalScoreResponse, RetrieveTaskResponse, SetupTaskResponse
+from benchmark_runner.sandbox.manifest import (
+    AgentSpec,
+    DatasetSpec,
+    EvalSpec,
+    Manifest,
+    ServiceSpec,
+    TaskEntry,
+)
 from benchmark_runner.schemas import GenerationStatus
+
+
+def make_manifest(
+    name: str = "mybench",
+    *,
+    image: str = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64,
+    service_version: str | None = "0.6.1",
+) -> Manifest:
+    """Minimal valid manifest for store/CLI tests: two tasks, shared image, one secret."""
+    return Manifest(
+        benchmark=name,
+        service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version=service_version),
+        dataset=DatasetSpec(name=f"{name}-dataset"),
+        agent=AgentSpec(
+            install_cmd=None,
+            run_cmd="agent run --model {model} --problem {problem_statement_path}",
+            final_output="/app/results",
+            required_env=["GOOGLE_API_KEY"],
+        ),
+        eval=EvalSpec(
+            evaluate_endpoint="/evaluate-response/",
+            score_endpoint="/final-score/",
+            payload_schema=f"{name}.text.v1",
+        ),
+        tasks=[
+            TaskEntry(
+                id=task_id,
+                question=question,
+                timeout=60.0,
+                image=image,
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+                problem_path="/app/problem.txt",
+            )
+            for task_id, question in (("task-1", "Q1"), ("task-2", "Q2"))
+        ],
+    )
 
 
 class FakeExecResult:
@@ -28,6 +73,8 @@ class FakeSandbox:
         self._id = sandbox_id
         self._task_answer = task_answer
         self._generation_status = generation_status
+        self.uploads: list[tuple[str, bytes]] = []
+        self.commands: list[str] = []
 
     @property
     def id(self) -> str:
@@ -40,7 +87,11 @@ class FakeSandbox:
         cwd: str | None = None,
         timeout: float | None = None,
     ) -> FakeExecResult:
+        self.commands.append(command)
         return FakeExecResult(exit_code=0, output="")
+
+    async def upload_file(self, remote_path: str, content: bytes) -> None:
+        self.uploads.append((remote_path, content))
 
     async def download_file(self, remote_path: str) -> bytes:
         # Parse task_id from path: "<final_output>/<task_id>/generation.json"
@@ -60,13 +111,16 @@ class FakeProvider:
         self.created: list[str] = []
         self.deleted: list[str] = []
         self.last_request: SandboxCreateRequest | None = None
+        self.last_sandbox: FakeSandbox | None = None
         self._generation_status = generation_status
 
     async def create_sandbox(self, request: SandboxCreateRequest) -> FakeSandbox:
         self.created.append(request.name)
         self.last_request = request
         sandbox_id = f"sandbox-{request.name}"
-        return FakeSandbox(sandbox_id=sandbox_id, generation_status=self._generation_status)
+        sandbox = FakeSandbox(sandbox_id=sandbox_id, generation_status=self._generation_status)
+        self.last_sandbox = sandbox
+        return sandbox
 
     async def delete_sandbox(self, instance_id: str) -> None:
         self.deleted.append(instance_id)
@@ -79,6 +133,8 @@ class FakeClient:
         self._source = ImageSource(image="img:latest")
         self._resources = Resources(vcpu=1, memory=2, disk=5)
         self.last_final_score_args: dict[str, object] | None = None
+        self.retrieve_task_call_count: int = 0
+        self.setup_task_call_count: int = 0
 
     async def retrieve_task(
         self,
@@ -86,6 +142,7 @@ class FakeClient:
         skip_validation: bool = False,
         dataset: str | None = None,
     ) -> RetrieveTaskResponse:
+        self.retrieve_task_call_count += 1
         return RetrieveTaskResponse(
             source=self._source,
             cwd="/app",
@@ -102,6 +159,7 @@ class FakeClient:
         dataset: str | None = None,
         sandbox_provider: object = None,
     ) -> SetupTaskResponse:
+        self.setup_task_call_count += 1
         return SetupTaskResponse(status="ok")
 
     async def evaluate_response(

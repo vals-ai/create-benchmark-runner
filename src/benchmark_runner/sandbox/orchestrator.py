@@ -3,11 +3,13 @@
 import asyncio
 import logging
 import os
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from benchmark_service.sandbox import SandboxCreateRequest
-from benchmark_service.sandbox.types import ImageSource, SandboxSource
+from benchmark_service.sandbox.types import ImageSource, Resources, SandboxSource
 
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
@@ -24,6 +26,19 @@ from benchmark_runner.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Bring-your-own-model-endpoint env vars, forwarded into every sandbox when set,
+# independent of the contract. A lab evaluating its own (often unreleased) model
+# points generation at its own endpoint; the baked runner reads these from env
+# (create-benchmark-runner cli.py CUSTOM_ENDPOINT/CUSTOM_API_KEY fallbacks), so no
+# run_cmd or per-agent contract change is needed. These are universal generation
+# parameters, not agent-specific secrets, so they live here rather than in any
+# contract's `secrets:` — keeping the lab's model and endpoint off Vals infra.
+_BYO_ENDPOINT_ENV_VARS = (
+    "CUSTOM_ENDPOINT",
+    "CUSTOM_API_KEY",
+)
+
 
 def _require_image_source(source: SandboxSource) -> ImageSource:
     """Only pullable registry images are supported as sandbox sources.
@@ -46,6 +61,10 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
     own environment. Keying on the contract keeps unrelated orchestrator env
     (SERVICE_URL, Daytona creds) out of the sandbox; a declared name missing from
     the env is an error, since the agent would only fail later without it.
+
+    The BYO-endpoint vars (_BYO_ENDPOINT_ENV_VARS) are forwarded on top whenever
+    set, independent of the contract, so a lab can point generation at its own
+    model endpoint without editing any agent's contract.
     """
     env: dict[str, str] = {}
     missing: list[str] = []
@@ -60,6 +79,10 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
             "contract declares secret(s) not set in the orchestrator env: "
             + ", ".join(sorted(missing))
         )
+    for var_name in _BYO_ENDPOINT_ENV_VARS:
+        value = os.environ.get(var_name)
+        if value:
+            env[var_name] = value
     return env
 
 # Sandbox lifecycle constants
@@ -69,6 +92,16 @@ SANDBOX_AUTO_STOP_INTERVAL = 30
 SANDBOX_CREATE_TIMEOUT = 600  # seconds to wait for sandbox readiness
 
 
+@dataclass(frozen=True)
+class SandboxTaskSpec:
+    source: SandboxSource
+    resources: Resources
+    cwd: str
+    agent_timeout: float | None
+    question: str
+    problem_path: str
+
+
 async def run_benchmark(
     *,
     run_id: str,
@@ -76,15 +109,21 @@ async def run_benchmark(
     task_ids: list[str],
     dataset: str | None,
     results_dir: str,
-    contract_path: Path | str,
+    contract_path: Path | str | None = None,
+    contract: AgentContract | None = None,
     client: BenchmarkServiceClientLike,
     provider: SandboxProviderLike | None = None,
     parallelism: int = 10,
     source_override: ImageSource | None = None,
+    task_specs: Mapping[str, SandboxTaskSpec] | None = None,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
     Handles resume: skips generation/eval if valid artifacts already exist.
+
+    Exactly one of `contract_path` (load contract.yaml from disk) or `contract`
+    (an in-memory AgentContract, e.g. built from an installed manifest via
+    `_contract_from_manifest`) must be provided.
 
     source_override: when set, boot every sandbox from this image instead of the
     one retrieve_task returns. Eval is text-based (the generation string is sent to
@@ -96,10 +135,16 @@ async def run_benchmark(
     if parallelism < 1:
         raise ValueError(f"parallelism must be >= 1, got {parallelism}")
 
+    if contract_path is not None:
+        if contract is not None:
+            raise ValueError("provide exactly one of contract or contract_path, not both")
+        contract = AgentContract.from_yaml(Path(contract_path))
+    elif contract is None:
+        raise ValueError("provide exactly one of contract or contract_path")
+
     if provider is None:
         provider = client.get_sandbox_provider()
 
-    contract = AgentContract.from_yaml(Path(contract_path))
     # Without final_output there is no result file to read; fail before booting sandboxes.
     if contract.final_output is None:
         raise ValueError("contract.final_output is not set; no generation file to read")
@@ -140,10 +185,25 @@ async def run_benchmark(
 
         sandbox = None
         try:
-            td = await client.retrieve_task(task_id=tid, dataset=dataset)
+            task_spec = task_specs.get(tid) if task_specs is not None else None
+            # Manifest-native tasks (spec present) skip the service callbacks: the
+            # service cannot reach lab/local sandboxes, so the orchestrator uploads
+            # the question itself and lab credentials stay lab-side.
+            if task_spec is not None:
+                source = task_spec.source
+                resources, cwd = task_spec.resources, task_spec.cwd
+                agent_timeout, problem_path = task_spec.agent_timeout, task_spec.problem_path
+            else:
+                td = await client.retrieve_task(task_id=tid, dataset=dataset)
+                source, resources, cwd = td.source, td.resources, td.cwd
+                agent_timeout, problem_path = td.agent_timeout, td.problem_path
+            if source_override is not None:
+                source = source_override
+            else:
+                source = _require_image_source(source)
             req = SandboxCreateRequest(
-                source=source_override if source_override is not None else _require_image_source(td.source),
-                resources=td.resources,
+                source=source,
+                resources=resources,
                 name=f"{run_id}-{tid}",
                 labels={},
                 env_vars=secret_env,
@@ -152,15 +212,18 @@ async def run_benchmark(
             )
             sandbox = await provider.create_sandbox(req)
             try:
-                await client.setup_task(task_id=tid, instance_id=sandbox.id, dataset=dataset)
+                if task_spec is not None:
+                    await sandbox.upload_file(problem_path, task_spec.question.encode())
+                else:
+                    await client.setup_task(task_id=tid, instance_id=sandbox.id, dataset=dataset)
                 gen = await backend.generate(
                     sandbox=sandbox,
                     contract=contract,
                     task_id=tid,
                     model=model,
-                    problem_path=td.problem_path,
-                    cwd=td.cwd,
-                    agent_timeout=td.agent_timeout,
+                    problem_path=problem_path,
+                    cwd=cwd,
+                    agent_timeout=agent_timeout,
                     log_dir=artifacts.agent_logs_dir(tid),
                 )
             finally:
@@ -247,4 +310,4 @@ async def run_benchmark(
     artifacts.save_final_score(score)
 
 
-__all__ = ["run_benchmark"]
+__all__ = ["SandboxTaskSpec", "run_benchmark"]

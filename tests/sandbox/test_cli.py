@@ -4,9 +4,15 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+import yaml
 from click.testing import CliRunner
 
+from benchmark_service.sandbox import Resources
+from benchmark_service.sandbox.types import ImageSource
+from tests.sandbox.conftest import make_manifest
 from benchmark_runner.sandbox.cli import cli
+from benchmark_runner.sandbox.manifest import AgentSpec, DatasetSpec, EvalSpec, Manifest, ServiceSpec, TaskEntry
+from benchmark_runner.sandbox.store import install_manifest
 
 
 @pytest.fixture
@@ -43,6 +49,10 @@ def test_run_maps_args_to_run_benchmark(contract_file: str, monkeypatch: pytest.
     assert calls[0]["model"] == "m"
     assert calls[0]["run_id"] == "r"
     assert calls[0]["parallelism"] == 10
+    # Direct mode: contract comes from the file, never from the manifest store
+    assert calls[0]["contract_path"] == Path(contract_file)
+    assert calls[0]["contract"] is None
+    assert calls[0]["results_dir"] == "results"
 
 
 def test_run_no_task_ids_exits_nonzero(contract_file: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -56,3 +66,163 @@ def test_run_no_task_ids_exits_nonzero(contract_file: str, monkeypatch: pytest.M
     )
 
     assert result.exit_code != 0
+
+
+def _make_manifest_with_distinct_problem_paths(name: str = "mybench") -> Manifest:
+    """Manifest where task-1 and task-2 have DIFFERENT problem_paths, proving
+    _task_specs_from_manifest fans out per-task rather than reading agent-level."""
+    image = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64
+    return Manifest(
+        benchmark=name,
+        service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version="0.6.1"),
+        dataset=DatasetSpec(name=f"{name}-dataset"),
+        agent=AgentSpec(
+            install_cmd=None,
+            run_cmd="agent run --model {model} --problem {problem_statement_path}",
+            final_output="/app/results",
+            required_env=["GOOGLE_API_KEY"],
+        ),
+        eval=EvalSpec(
+            evaluate_endpoint="/evaluate-response/",
+            score_endpoint="/final-score/",
+            payload_schema=f"{name}.text.v1",
+        ),
+        tasks=[
+            TaskEntry(
+                id="task-1",
+                question="Q1",
+                timeout=60.0,
+                image=image,
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+                problem_path="/app/problem.txt",
+            ),
+            TaskEntry(
+                id="task-2",
+                question="Q2",
+                timeout=60.0,
+                image=image,
+                resources=Resources(vcpu=2, memory=4, disk=10),
+                cwd="/app",
+                problem_path="/app/task2_problem.txt",
+            ),
+        ],
+    )
+
+
+def test_run_manifest_mode_uses_installed_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without --contract, the first positional is an installed benchmark name:
+    empty task ids expand to all manifest tasks, the contract (incl. required_env) is
+    built in memory, dataset/service URL come from the manifest, and results
+    nest under <results-dir>/<benchmark>. problem_path is read per-task (not agent-level)."""
+    calls: list[dict] = []
+    client_urls: list[str] = []
+
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
+        calls.append(kwargs)
+
+    def fake_client(url: str, **kwargs: object) -> MagicMock:
+        client_urls.append(url)
+        return MagicMock()
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", fake_client)
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        install_manifest(_make_manifest_with_distinct_problem_paths("mybench"))
+        result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r", "mybench"])
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call["task_ids"] == ["task-1", "task-2"]  # empty task ids = all tasks
+    assert call["contract_path"] is None
+    # manifest carries names only; reconstructed contract maps each name to itself
+    assert call["contract"].secrets == {"GOOGLE_API_KEY": "GOOGLE_API_KEY"}
+    assert "{problem_statement_path}" in call["contract"].run_cmd
+    assert call["dataset"] == "mybench-dataset"
+    assert call["results_dir"] == str(Path("results") / "mybench")
+    assert client_urls == ["http://svc"]  # manifest's service.url
+    assert call["task_specs"]["task-1"].source == ImageSource(
+        image="ghcr.io/vals-ai/agent@sha256:" + "a" * 64
+    )
+    assert call["task_specs"]["task-1"].resources == Resources(vcpu=2, memory=4, disk=10)
+    assert call["task_specs"]["task-1"].cwd == "/app"
+    assert call["task_specs"]["task-1"].agent_timeout == 60.0
+    # problem_path is per-task: each task entry has its own value (not agent-level)
+    assert call["task_specs"]["task-1"].question == "Q1"
+    assert call["task_specs"]["task-1"].problem_path == "/app/problem.txt"
+    assert call["task_specs"]["task-2"].question == "Q2"
+    assert call["task_specs"]["task-2"].problem_path == "/app/task2_problem.txt"
+
+
+def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:
+    """An uninstalled benchmark name fails fast and names what IS installed."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        install_manifest(make_manifest("mybench"))
+        result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r", "nope"])
+
+    assert result.exit_code != 0
+    assert "not installed" in result.output
+    assert "mybench" in result.output
+
+
+def test_add_replaces_unreadable_installed_manifest(tmp_path: Path) -> None:
+    """An installed manifest from an older schema must not block reinstalling:
+    add warns, skips the pin diff, and replaces (a lab upgrading across a
+    manifest-schema change hits exactly this)."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        store = Path("benchmarks")
+        store.mkdir()
+        (store / "mybench.manifest.yaml").write_text("benchmark: mybench\nagent: [not, the, schema]\n")
+
+        manifest_file = Path("mybench.yaml")
+        manifest_file.write_text(yaml.safe_dump(make_manifest("mybench").model_dump(), sort_keys=False))
+
+        result = runner.invoke(cli, ["add", str(manifest_file)])
+        assert result.exit_code == 0, result.output
+        assert "unreadable" in result.output
+        assert "Installed mybench" in result.output
+        # Replaced copy is now loadable
+        assert "mybench" in runner.invoke(cli, ["list"]).output
+
+
+def test_add_and_list_flow(tmp_path: Path) -> None:
+    """add installs into ./benchmarks with a summary; re-add prints a pin diff
+    (or 'no pin changes'); list shows installed manifests with short digests."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(cli, ["list"])
+        assert result.exit_code == 0
+        assert "No benchmarks installed" in result.output
+
+        manifest_file = Path("mybench.yaml")
+        manifest_file.write_text(yaml.safe_dump(make_manifest("mybench").model_dump(), sort_keys=False))
+
+        result = runner.invoke(cli, ["add", str(manifest_file)])
+        assert result.exit_code == 0, result.output
+        assert Path("benchmarks/mybench.manifest.yaml").exists()
+        assert "2 tasks" in result.output
+        assert "service version: 0.6.1" in result.output
+
+        # Re-add identical → explicit "no pin changes"
+        result = runner.invoke(cli, ["add", str(manifest_file)])
+        assert result.exit_code == 0
+        assert "no pin changes" in result.output
+
+        # Re-add with a new image digest → per-task pin diff lines before replacing
+        changed = make_manifest("mybench", image="ghcr.io/vals-ai/agent@sha256:" + "b" * 64)
+        manifest_file.write_text(yaml.safe_dump(changed.model_dump(), sort_keys=False))
+        result = runner.invoke(cli, ["add", str(manifest_file)])
+        assert result.exit_code == 0
+        assert "tasks.task-1.image" in result.output and "→" in result.output
+
+        result = runner.invoke(cli, ["list"])
+        assert result.exit_code == 0
+        assert "mybench" in result.output
+        assert "b" * 12 in result.output  # short digest shown ...
+        assert "b" * 64 not in result.output  # ... not the full one
