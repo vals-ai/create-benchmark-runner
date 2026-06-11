@@ -6,8 +6,10 @@ real-daemon path is covered by the `docker`-marked smoke test at the bottom,
 which is deselected by default (pyproject addopts) and needs a local daemon.
 """
 
+import asyncio
 import io
 import tarfile
+import time
 
 import pytest
 from docker.errors import APIError, ImageNotFound, NotFound
@@ -106,6 +108,16 @@ class FakeContainers:
         return list(self.existing.values())
 
 
+class SlowRunContainers(FakeContainers):
+    def __init__(self, *, delay: float, run_result: FakeContainer):
+        super().__init__(run_result=run_result)
+        self.delay = delay
+
+    def run(self, image: str, **kwargs: object) -> FakeContainer:
+        time.sleep(self.delay)
+        return super().run(image, **kwargs)
+
+
 class FakeImages:
     def __init__(self, *, present: bool = True):
         self.present = present
@@ -130,15 +142,15 @@ def _provider(client: FakeDockerClient, **kwargs) -> LocalDockerSandboxProvider:
     return LocalDockerSandboxProvider(client=client, **kwargs)  # pyright: ignore[reportArgumentType]
 
 
-def _request(source, *, name: str = "r1-t1") -> SandboxCreateRequest:
+def _request(source, *, name: str = "r1-t1", resources: Resources | None = None, create_timeout: int = 60) -> SandboxCreateRequest:
     return SandboxCreateRequest(
         source=source,
-        resources=Resources(vcpu=1, memory=1, disk=1),
+        resources=resources or Resources(vcpu=1, memory=1, disk=1),
         name=name,
         labels={"k": "v"},
         env_vars={"FOO": "bar"},
         auto_stop_interval=0,
-        create_timeout=60,
+        create_timeout=create_timeout,
     )
 
 
@@ -169,7 +181,9 @@ async def test_create_sandbox_boots_keepalive_container():
     client = FakeDockerClient(containers=FakeContainers(run_result=container))
     provider = _provider(client, extra_env={"FOO": "loses", "EXTRA": "1"})
 
-    sandbox = await provider.create_sandbox(_request(ImageSource(image="img:tag")))
+    sandbox = await provider.create_sandbox(
+        _request(ImageSource(image="img:tag"), resources=Resources(vcpu=2, memory=4, disk=9))
+    )
 
     assert sandbox.id == "abc123"
     assert sandbox.name == "r1-t1"
@@ -185,6 +199,8 @@ async def test_create_sandbox_boots_keepalive_container():
     assert run_call["labels"] == {_PROVIDER_LABEL: "", "k": "v"}
     # extra_env merged in, request env_vars winning on conflict
     assert run_call["environment"] == {"FOO": "bar", "EXTRA": "1"}
+    assert run_call["nano_cpus"] == 2_000_000_000
+    assert run_call["mem_limit"] == "4g"
     # the sh preflight ran against the new container
     assert container.exec_calls == [(["sh", "-c", "true"], False)]
 
@@ -222,6 +238,7 @@ async def test_create_sandbox_diagnoses_exited_container():
     client = FakeDockerClient(containers=FakeContainers(run_result=container))
     with pytest.raises(SandboxError, match="tail"):
         await _provider(client).create_sandbox(_request(ImageSource(image="img:tag")))
+    assert container.removed
 
 
 @pytest.mark.parametrize("outcome", [(127, (b"", b"")), APIError("no sh")])
@@ -230,6 +247,16 @@ async def test_create_sandbox_diagnoses_missing_sh(outcome: ExecOutcome):
     client = FakeDockerClient(containers=FakeContainers(run_result=container))
     with pytest.raises(SandboxError, match="sh"):
         await _provider(client).create_sandbox(_request(ImageSource(image="img:tag")))
+    assert container.removed
+
+
+async def test_create_sandbox_timeout_cleans_up_late_container():
+    container = FakeContainer()
+    client = FakeDockerClient(containers=SlowRunContainers(delay=1.05, run_result=container))
+    with pytest.raises(SandboxError, match="timed out"):
+        await _provider(client).create_sandbox(_request(ImageSource(image="img:tag"), create_timeout=1))
+    await asyncio.sleep(0.1)
+    assert container.removed
 
 
 async def test_exec_joins_demuxed_streams_with_newline():
@@ -326,6 +353,14 @@ async def test_delete_sandbox_is_idempotent():
     await provider.delete_sandbox("cid")
     assert client.containers.existing["cid"].removed
     await provider.delete_sandbox("never-existed")  # NotFound is not an error
+
+
+async def test_delete_sandbox_refuses_unowned_container():
+    unowned = FakeContainer(labels={"someone": "else"})
+    client = FakeDockerClient(containers=FakeContainers(existing={"cid": unowned}))
+    with pytest.raises(SandboxError, match="does not own"):
+        await _provider(client).delete_sandbox("cid")
+    assert not unowned.removed
 
 
 async def test_list_sandboxes_filters_on_provider_label():

@@ -10,9 +10,10 @@ Docker daemon.
 Image requirements: containers are kept alive with ``tail -f /dev/null`` and
 commands run under ``sh -c``, so the image must contain ``tail`` and a POSIX
 ``sh`` — distroless/scratch images are unsupported. Container paths must be
-absolute. Resource limits and auto-stop are Daytona concepts with no faithful
-local equivalent and are intentionally ignored; snapshots are rejected outright.
-This is a local test/dev harness, not a production sandbox.
+absolute. CPU and memory limits are mapped to Docker limits; disk limits and
+auto-stop have no faithful local equivalent and are intentionally ignored.
+Snapshots are rejected outright. This is a local test/dev harness, not a
+production sandbox.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import posixpath
 import shlex
 import tarfile
 from collections.abc import AsyncGenerator, Mapping
+from contextlib import suppress
 from typing import cast
 
 import docker
@@ -51,6 +53,7 @@ _PROVIDER_LABEL = "benchmark-runner-local-sandbox"
 # would leave the image CMD to be appended as bogus extra args to tail.
 _KEEPALIVE_ENTRYPOINT = ["tail"]
 _KEEPALIVE_COMMAND = ["-f", "/dev/null"]
+_NANO_CPUS_PER_VCPU = 1_000_000_000
 
 
 def _command(command: str, cwd: str | None, timeout: float | None) -> str:
@@ -101,6 +104,10 @@ def _tar_archive(remote_path: str, content: bytes) -> bytes:
         file_info.size = len(content)
         tar.addfile(file_info, io.BytesIO(content))
     return buf.getvalue()
+
+
+def _is_owned(container: Container) -> bool:
+    return _PROVIDER_LABEL in (container.labels or {})
 
 
 class LocalDockerSandbox(Sandbox):
@@ -219,16 +226,30 @@ class LocalDockerSandboxProvider(SandboxProvider):
                 f"image); got {request.source!r}. Daytona snapshots cannot run locally."
             )
         image = request.source.image
+        create_task = asyncio.create_task(asyncio.to_thread(self._create_container, request, image))
         try:
             container = await asyncio.wait_for(
-                asyncio.to_thread(self._create_container, request, image),
+                asyncio.shield(create_task),
                 timeout=request.create_timeout,
             )
         except TimeoutError as e:
+            self._cleanup_late_create(create_task)
             raise SandboxError(f"sandbox create timed out after {request.create_timeout}s (image pull included)") from e
         except (APIError, DockerException) as e:
             raise SandboxError(f"sandbox create failed for image {image!r}: {e}") from e
         return LocalDockerSandbox(container)
+
+    def _cleanup_late_create(self, create_task: asyncio.Task[Container]) -> None:
+        def cleanup(done: asyncio.Task[Container]) -> None:
+            try:
+                container = done.result()
+            except Exception:
+                return
+            if _is_owned(container):
+                with suppress(APIError, DockerException):
+                    container.remove(force=True)
+
+        create_task.add_done_callback(cleanup)
 
     def _create_container(self, request: SandboxCreateRequest, image: str) -> Container:
         """Blocking create path, run on a worker thread under request.create_timeout."""
@@ -239,7 +260,7 @@ class LocalDockerSandboxProvider(SandboxProvider):
         except NotFound:
             pass
         else:
-            if _PROVIDER_LABEL not in (stale.labels or {}):
+            if not _is_owned(stale):
                 raise SandboxError(
                     f"container name {request.name!r} is taken by a container this provider does not own"
                 )
@@ -256,23 +277,30 @@ class LocalDockerSandboxProvider(SandboxProvider):
             command=_KEEPALIVE_COMMAND,
             labels={_PROVIDER_LABEL: "", **request.labels},
             environment={**self._extra_env, **request.env_vars},
+            nano_cpus=request.resources.vcpu * _NANO_CPUS_PER_VCPU,
+            mem_limit=f"{request.resources.memory}g",
         )
-        container.reload()
-        if container.status != "running":
-            logs = container.logs(tail=20).decode("utf-8", "replace").strip()
-            raise SandboxError(
-                f"container for image {image!r} exited immediately instead of staying up; the image "
-                f"must contain `tail` (used as the keep-alive entrypoint). Last logs:\n{logs}"
-            )
         try:
-            sh_exit_code, _output = container.exec_run(["sh", "-c", "true"])
-        except APIError:
-            sh_exit_code = -1
-        if sh_exit_code != 0:
-            raise SandboxError(
-                f"image {image!r} cannot run `sh -c`; sandbox commands run under a POSIX `sh`, "
-                "which must be present in the image"
-            )
+            container.reload()
+            if container.status != "running":
+                logs = container.logs(tail=20).decode("utf-8", "replace").strip()
+                raise SandboxError(
+                    f"container for image {image!r} exited immediately instead of staying up; the image "
+                    f"must contain `tail` (used as the keep-alive entrypoint). Last logs:\n{logs}"
+                )
+            try:
+                sh_exit_code, _output = container.exec_run(["sh", "-c", "true"])
+            except APIError:
+                sh_exit_code = -1
+            if sh_exit_code != 0:
+                raise SandboxError(
+                    f"image {image!r} cannot run `sh -c`; sandbox commands run under a POSIX `sh`, "
+                    "which must be present in the image"
+                )
+        except Exception:
+            with suppress(APIError, DockerException):
+                container.remove(force=True)
+            raise
         return container
 
     async def get_sandbox(self, instance_id: str) -> LocalDockerSandbox:
@@ -287,6 +315,8 @@ class LocalDockerSandboxProvider(SandboxProvider):
             container = await asyncio.to_thread(self._client.containers.get, instance_id)
         except NotFound:
             return  # idempotent: already gone
+        if not _is_owned(container):
+            raise SandboxError(f"container {instance_id!r} exists but this provider does not own it")
         try:
             await asyncio.to_thread(container.remove, force=True)
         except APIError as e:
