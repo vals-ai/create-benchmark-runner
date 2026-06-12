@@ -426,12 +426,16 @@ async def test_setup_task_failure_deletes_sandbox_and_records_error(
 
 
 @pytest.mark.asyncio
-async def test_none_fill_in_final_score_when_eval_missing(
+async def test_run_raises_when_eval_persistence_fails(
     tmp_path: Path,
     contract_yaml: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If a task's eval cannot be saved (e.g. filesystem error), final_score receives None for that task."""
+    """If a task's eval cannot be saved (e.g. filesystem error), the run fails
+    loudly after every task finishes: healthy tasks' artifacts are preserved for
+    resume or a standalone `benchmark score`, and no final score is computed
+    over a silent gap. (Replaces the pre-split policy of submitting None and
+    scoring anyway — recovery now belongs to the score command.)"""
     run_id = "run-none"
     task_ids = ["task-good", "task-nofs"]
     client = FakeClient()
@@ -453,24 +457,23 @@ async def test_none_fill_in_final_score_when_eval_missing(
 
     monkeypatch.setattr(RunArtifacts, "save_eval", save_eval_with_failure)
 
-    await run_benchmark(
-        run_id=run_id,
-        model="openai/gpt-5",
-        task_ids=task_ids,
-        dataset=None,
-        results_dir=str(tmp_path),
-        contract_path=contract_yaml,
-        client=client,
-        provider=provider,
-    )
+    with pytest.raises(OSError, match="synthetic save_eval failure"):
+        await run_benchmark(
+            run_id=run_id,
+            model="openai/gpt-5",
+            task_ids=task_ids,
+            dataset=None,
+            results_dir=str(tmp_path),
+            contract_path=contract_yaml,
+            client=client,
+            provider=provider,
+        )
 
-    # final_score.json written despite the error
-    assert (tmp_path / run_id / "final_score.json").exists()
-
-    # task-nofs has no eval on disk → submitted as None
-    assert client.last_final_score_args is not None
-    assert client.last_final_score_args["task-nofs"] is None
-    assert client.last_final_score_args["task-good"] is not None
+    # the healthy task completed and persisted before the failure surfaced
+    good_eval = artifacts.load_eval("task-good")
+    assert good_eval is not None and good_eval.status == EvalStatus.EVALUATED
+    # no final score over a run with a silently missing eval
+    assert not (tmp_path / run_id / "final_score.json").exists()
 
 
 @pytest.mark.asyncio

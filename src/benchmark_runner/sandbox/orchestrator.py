@@ -92,6 +92,21 @@ SANDBOX_AUTO_STOP_INTERVAL = 30
 SANDBOX_CREATE_TIMEOUT = 600  # seconds to wait for sandbox readiness
 
 
+def _raise_first_unexpected(results: list[Any]) -> None:
+    """Surface unexpected per-task exceptions: log every one, then raise the first.
+
+    Per-task error handling writes error artifacts and never raises, so anything
+    arriving here (e.g. a corrupt artifact read on resume) is bad state worth
+    failing the command over — after all other tasks have finished, so completed
+    work is on disk and a rerun resumes.
+    """
+    errors = [r for r in results if isinstance(r, BaseException)]
+    for exc in errors:
+        logger.error("unexpected task exception: %s", exc)
+    if errors:
+        raise errors[0]
+
+
 @dataclass(frozen=True)
 class SandboxTaskSpec:
     source: SandboxSource
@@ -257,9 +272,7 @@ async def run_benchmark(
         artifacts.save_generation(tid, gen)
 
     results = await asyncio.gather(*(_run_task(tid) for tid in task_ids), return_exceptions=True)
-    for r in results:
-        if isinstance(r, BaseException):
-            logger.error("unexpected task exception (should have been caught): %s", r)
+    _raise_first_unexpected(results)
 
     if skip_eval:
         return
@@ -359,10 +372,7 @@ async def evaluate_run(
             await _evaluate_task(artifacts=artifacts, client=client, dataset=dataset, task_id=tid)
 
     results = await asyncio.gather(*(_one(tid) for tid in task_ids), return_exceptions=True)
-    for r in results:
-        if isinstance(r, BaseException):
-            logger.error("unexpected eval exception (should have been caught): %s", r)
-            raise r
+    _raise_first_unexpected(results)
 
 
 async def score_run(

@@ -274,3 +274,29 @@ def test_cli_score_manifest_mode_defaults_to_full_task_list(
     (call,) = calls
     assert call["task_ids"] == ["task-1", "task-2"]
     assert "final_score=0.5" in result.output
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_raises_artifact_read_failures(
+    tmp_path: Path, contract_yaml: Path
+) -> None:
+    """run_benchmark surfaces unexpected per-task exceptions (e.g. a corrupt
+    pre-existing artifact read on resume) the same way evaluate_run does — the
+    command fails instead of silently scoring around the bad task."""
+    artifacts = RunArtifacts(results_dir=tmp_path, run_id="r1")
+    generation_path = artifacts.generation_path("t1")
+    generation_path.parent.mkdir(parents=True)
+    generation_path.write_text("{not json")
+
+    with pytest.raises(json.JSONDecodeError):
+        await run_benchmark(
+            run_id="r1",
+            model="openai/gpt-5",
+            task_ids=["t1"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            contract_path=contract_yaml,
+            client=FakeClient(),
+            provider=FakeProvider(),
+        )
+    assert not artifacts.final_score_path.exists()  # failed before scoring
