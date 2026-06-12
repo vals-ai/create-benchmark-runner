@@ -215,6 +215,33 @@ def test_add_replaces_unreadable_installed_manifest(tmp_path: Path) -> None:
         assert "mybench" in runner.invoke(cli, ["list"]).output
 
 
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["run", "--model", "m", "--run-id", "r", "mybench"],
+        ["eval", "--run-id", "r", "mybench"],
+        ["score", "--run-id", "r", "mybench"],
+    ],
+)
+def test_manifest_commands_report_unreadable_installed_manifest(
+    tmp_path: Path, args: list[str]
+) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        store = Path("benchmarks")
+        store.mkdir()
+        installed = make_manifest("mybench").model_dump()
+        installed["agent"]["install_cmd"] = "bash setup.sh"
+        installed["agent"].pop("bundle", None)
+        (store / "mybench.manifest.yaml").write_text(yaml.safe_dump(installed, sort_keys=False))
+
+        result = runner.invoke(cli, args)
+
+    assert result.exit_code != 0
+    assert "installed manifest for 'mybench' is unreadable" in result.output
+    assert "benchmark add <manifest.yaml>" in result.output
+
+
 def test_add_and_list_flow(tmp_path: Path) -> None:
     """add installs into ./benchmarks with a summary; re-add prints a pin diff
     (or 'no pin changes'); list shows installed manifests with short digests."""

@@ -83,6 +83,32 @@ def _load_bundle_arg(path: Path) -> AgentBundle:
     return load_bundle(path)
 
 
+def _installed_summary() -> str:
+    try:
+        return ", ".join(m.benchmark for m in list_installed()) or "none"
+    except Exception:
+        return "some installed manifests are unreadable"
+
+
+def _load_installed_benchmark(name: str, *, direct_hint: bool = False) -> Manifest:
+    try:
+        mf = load_installed(name)
+    except Exception as exc:
+        raise click.ClickException(
+            f"installed manifest for '{name}' is unreadable; "
+            "reinstall it with `benchmark add <manifest.yaml>`"
+        ) from exc
+    if mf is not None:
+        return mf
+
+    action = "install it with `benchmark add <manifest.yaml>`"
+    if direct_hint:
+        action = f"{action} or pass --direct for task ids"
+    raise click.ClickException(
+        f"benchmark '{name}' is not installed (installed: {_installed_summary()}); {action}"
+    )
+
+
 @cli.command()
 @click.option("--model", required=True, help="Model identifier")
 @click.option("--run-id", required=True, help="Unique run identifier")
@@ -138,13 +164,7 @@ def run(
         if not args:
             raise click.UsageError("BENCHMARK name is required (or pass --contract for direct mode).")
         benchmark_name, *manifest_task_ids = args
-        mf = load_installed(benchmark_name)
-        if mf is None:
-            installed = ", ".join(m.benchmark for m in list_installed()) or "none"
-            raise click.ClickException(
-                f"benchmark '{benchmark_name}' is not installed (installed: {installed}); "
-                "install it with `benchmark add <manifest.yaml>`"
-            )
+        mf = _load_installed_benchmark(benchmark_name)
         task_ids = manifest_task_ids or [t.id for t in mf.tasks]
         agent_contract = _contract_from_manifest(mf)
         task_specs = _task_specs_from_manifest(mf)
@@ -217,13 +237,7 @@ def _resolve_results_target(
             list(args),
             None,
         )
-    mf = load_installed(args[0])
-    if mf is None:
-        installed = ", ".join(m.benchmark for m in list_installed()) or "none"
-        raise click.ClickException(
-            f"benchmark '{args[0]}' is not installed (installed: {installed}); "
-            "install it with `benchmark add <manifest.yaml>` or pass --direct for task ids"
-        )
+    mf = _load_installed_benchmark(args[0], direct_hint=True)
     return (
         service_url or mf.service.url,
         dataset or mf.dataset.name,
