@@ -116,10 +116,16 @@ async def run_benchmark(
     parallelism: int = 10,
     source_override: ImageSource | None = None,
     task_specs: Mapping[str, SandboxTaskSpec] | None = None,
+    skip_eval: bool = False,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
     Handles resume: skips generation/eval if valid artifacts already exist.
+
+    skip_eval: generation only — no per-task evaluation and no final score, so
+    generation can be sliced across invocations/machines into one shared
+    results/<run_id>/ and evaluated later with `evaluate_run`, then scored once
+    with `score_run`.
 
     Exactly one of `contract_path` (load contract.yaml from disk) or `contract`
     (an in-memory AgentContract, e.g. built from an installed manifest via
@@ -177,7 +183,8 @@ async def run_benchmark(
         # throttle throughput.
         async with sem:
             await _process_generation(tid)
-        await _process_eval(tid)
+        if not skip_eval:
+            await _evaluate_task(artifacts=artifacts, client=client, dataset=dataset, task_id=tid)
 
     async def _process_generation(tid: str) -> None:
         if not is_generation_redoable(artifacts, tid):
@@ -243,50 +250,146 @@ async def run_benchmark(
 
         artifacts.save_generation(tid, gen)
 
-    async def _process_eval(tid: str) -> None:
-        if not is_eval_redoable(artifacts, tid):
-            return
-
-        gen = artifacts.load_generation(tid)
-        if gen is None:
-            ev = EvalResult(
-                task_id=tid,
-                status=EvalStatus.GENERATION_ERROR,
-                error="generation result missing",
-            )
-        elif gen.status in (GenerationStatus.MAX_TIME, GenerationStatus.MAX_TURNS):
-            ev = EvalResult(task_id=tid, status=EvalStatus.DID_NOT_COMPLETE)
-        elif gen.status != GenerationStatus.SUCCESS:
-            ev = EvalResult(
-                task_id=tid,
-                status=EvalStatus.GENERATION_ERROR,
-                error=gen.error,
-            )
-        else:
-            try:
-                raw = await client.evaluate_response(
-                    task_id=tid,
-                    response=gen.data,
-                    dataset=dataset,
-                )
-                data = EvalResultData.model_validate(raw) if raw is not None else None
-                ev = EvalResult(task_id=tid, status=EvalStatus.EVALUATED, result=data)
-            except Exception as exc:
-                ev = EvalResult(task_id=tid, status=EvalStatus.ERROR, error=_format_exc(exc))
-
-        artifacts.save_eval(tid, ev)
-
     results = await asyncio.gather(*(_run_task(tid) for tid in task_ids), return_exceptions=True)
     for r in results:
         if isinstance(r, BaseException):
             logger.error("unexpected task exception (should have been caught): %s", r)
 
-    # Final score: build submitted dict, fill missing as None
+    if skip_eval:
+        return
+
+    await score_run(
+        run_id=run_id,
+        results_dir=results_dir,
+        client=client,
+        dataset=dataset,
+        task_ids=config_task_ids,
+    )
+
+
+def _discover_task_ids(artifacts: RunArtifacts) -> list[str]:
+    """Task ids present on disk: every task dir holding a generation.json.
+
+    The authoritative set for evaluating a run whose generation happened in
+    slices (multiple `run --skip-eval` invocations writing into one shared
+    results/<run_id>/), where no single invocation's run_config lists them all.
+    """
+    return sorted(p.parent.name for p in artifacts.run_dir.glob("*/generation.json"))
+
+
+async def _evaluate_task(
+    *,
+    artifacts: RunArtifacts,
+    client: BenchmarkServiceClientLike,
+    dataset: str | None,
+    task_id: str,
+) -> None:
+    """Evaluate one task's on-disk generation; resume-aware (skips clean evals)."""
+    if not is_eval_redoable(artifacts, task_id):
+        return
+
+    gen = artifacts.load_generation(task_id)
+    if gen is None:
+        ev = EvalResult(
+            task_id=task_id,
+            status=EvalStatus.GENERATION_ERROR,
+            error="generation result missing",
+        )
+    elif gen.status in (GenerationStatus.MAX_TIME, GenerationStatus.MAX_TURNS):
+        ev = EvalResult(task_id=task_id, status=EvalStatus.DID_NOT_COMPLETE)
+    elif gen.status != GenerationStatus.SUCCESS:
+        ev = EvalResult(
+            task_id=task_id,
+            status=EvalStatus.GENERATION_ERROR,
+            error=gen.error,
+        )
+    else:
+        try:
+            raw = await client.evaluate_response(
+                task_id=task_id,
+                response=gen.data,
+                dataset=dataset,
+            )
+            data = EvalResultData.model_validate(raw) if raw is not None else None
+            ev = EvalResult(task_id=task_id, status=EvalStatus.EVALUATED, result=data)
+        except Exception as exc:
+            ev = EvalResult(task_id=task_id, status=EvalStatus.ERROR, error=_format_exc(exc))
+
+    artifacts.save_eval(task_id, ev)
+
+
+async def evaluate_run(
+    *,
+    run_id: str,
+    results_dir: str,
+    client: BenchmarkServiceClientLike,
+    dataset: str | None = None,
+    task_ids: list[str] | None = None,
+    parallelism: int = 10,
+) -> None:
+    """Evaluate a run's existing generations against the service, standalone.
+
+    Defaults to every task with a generation.json under results/<run_id>/, so
+    generation slices produced by separate `run --skip-eval` invocations are all
+    picked up. Resume-aware: tasks that already evaluated cleanly are skipped.
+    No sandbox or provider is involved — evaluation is HTTP to the service.
+    """
+    if parallelism < 1:
+        raise ValueError(f"parallelism must be >= 1, got {parallelism}")
+
+    artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
+    config = artifacts.load_run_config()
+    if dataset is None and config is not None:
+        dataset = config.get("dataset_name")
+    if task_ids is None:
+        task_ids = _discover_task_ids(artifacts)
+    if not task_ids:
+        raise ValueError(f"no generations found under {artifacts.run_dir}; nothing to evaluate")
+
+    sem = asyncio.Semaphore(parallelism)
+
+    async def _one(tid: str) -> None:
+        async with sem:
+            await _evaluate_task(artifacts=artifacts, client=client, dataset=dataset, task_id=tid)
+
+    results = await asyncio.gather(*(_one(tid) for tid in task_ids), return_exceptions=True)
+    for r in results:
+        if isinstance(r, BaseException):
+            logger.error("unexpected eval exception (should have been caught): %s", r)
+
+
+async def score_run(
+    *,
+    run_id: str,
+    results_dir: str,
+    client: BenchmarkServiceClientLike,
+    dataset: str | None = None,
+    task_ids: list[str] | None = None,
+) -> ScoreResult:
+    """Final-score a run from its on-disk eval results.
+
+    The scored set defaults to the run_config's frozen task list; pass task_ids
+    to score a different set (e.g. a manifest's full task list). Tasks without
+    an eval result submit as None and score zero, so a partial run cannot
+    silently inflate its score by omission.
+    """
+    artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
+    config = artifacts.load_run_config()
+    if dataset is None and config is not None:
+        dataset = config.get("dataset_name")
+    if task_ids is None:
+        if config is None:
+            raise ValueError(
+                f"no run_config.json under {artifacts.run_dir} and no task_ids given"
+            )
+        task_ids = list(config["tasks"])
+
+    # Build submitted dict, fill missing as None
     submitted: dict[str, Any] = {}
     missing = 0
     gen_errors = 0
     eval_errors = 0
-    for tid in config_task_ids:
+    for tid in task_ids:
         ev = artifacts.load_eval(tid)
         submitted[tid] = ev.model_dump(mode="json") if ev is not None else None
         if ev is None:
@@ -308,6 +411,7 @@ async def run_benchmark(
         complete=complete,
     )
     artifacts.save_final_score(score)
+    return score
 
 
-__all__ = ["SandboxTaskSpec", "run_benchmark"]
+__all__ = ["SandboxTaskSpec", "evaluate_run", "run_benchmark", "score_run"]
