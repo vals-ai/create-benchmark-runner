@@ -1,21 +1,16 @@
-"""Behavioral tests for agent bundle packaging and in-sandbox delivery."""
+"""Behavioral tests for agent bundle packaging."""
 
 import zipfile
 from pathlib import Path
 
 import pytest
 
-from tests.sandbox.conftest import FakeSandbox
-from benchmark_runner.sandbox.backend import SandboxGenerationBackend
 from benchmark_runner.sandbox.bundle import (
-    AgentBundle,
     build_bundle_zip,
     file_sha256,
     load_bundle,
     zip_root,
 )
-from benchmark_runner.sandbox.contract import AgentContract
-from benchmark_runner.schemas import GenerationStatus
 
 
 def _make_agent_dir(tmp_path: Path) -> Path:
@@ -68,33 +63,21 @@ def test_zip_root_rejects_loose_top_level_files(tmp_path: Path) -> None:
         zip_root(bad)
 
 
-@pytest.mark.asyncio
-async def test_backend_installs_bundle_at_bundle_root(tmp_path: Path) -> None:
-    """With a bundle, the backend uploads the zip, extracts it under /bundle, and
-    runs install_cmd from /bundle/<root> instead of the task cwd — the layout
-    internal sandboxes use, which run_cmds reference by absolute path."""
-    sandbox = FakeSandbox("s1")
-    contract = AgentContract(
-        name="my-agent",
-        install_cmd="bash setup.sh",
-        run_cmd="run --problem {problem_statement_path}",
-        final_output="/app/results",
-    )
-    result = await SandboxGenerationBackend().generate(
-        sandbox=sandbox,
-        contract=contract,
-        task_id="t1",
-        model="m",
-        problem_path="/app/problem.txt",
-        cwd="/app",
-        agent_timeout=None,
-        log_dir=tmp_path / "logs",
-        bundle=AgentBundle(root="my_agent", zip_bytes=b"zipbytes"),
-    )
+def test_zip_root_rejects_unsafe_entry_paths(tmp_path: Path) -> None:
+    """Entries escaping the bundle root (zip-slip) are rejected up front, never
+    left to unzip's sanitization behavior."""
+    for evil in ("../evil.py", "/abs/evil.py", "my_agent/../../evil.py"):
+        bad = tmp_path / "bad.zip"
+        with zipfile.ZipFile(bad, "w") as zf:
+            zf.writestr("my_agent/run.py", "x")
+            zf.writestr(evil, "x")
+        with pytest.raises(ValueError, match="unsafe entry"):
+            zip_root(bad)
 
-    assert result.status == GenerationStatus.SUCCESS
-    assert ("/tmp/my_agent.zip", b"zipbytes") in sandbox.uploads
-    extract_cmd = next(c for c in sandbox.commands if "unzip" in c)
-    assert "-d /bundle" in extract_cmd
-    install_cmd = next(c for c in sandbox.commands if "setup.sh" in c)
-    assert install_cmd.startswith("cd /bundle/my_agent && ")
+
+def test_build_bundle_zip_rejects_output_inside_agent_dir(tmp_path: Path) -> None:
+    """Writing the zip into the directory being bundled would absorb the
+    previous zip (and manifest) on every regeneration."""
+    agent = _make_agent_dir(tmp_path)
+    with pytest.raises(ValueError, match="inside the agent directory"):
+        build_bundle_zip(agent, agent / "my_agent.zip")

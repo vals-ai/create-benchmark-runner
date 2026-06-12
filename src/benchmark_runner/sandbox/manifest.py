@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 from benchmark_service.sandbox import ImageSource, Resources, SnapshotSource
 from benchmark_service.schemas import RetrieveTaskResponse, VersionResponse
@@ -39,6 +39,14 @@ class AgentSpec(BaseModel):
     final_output: str | None
     # Lab-facing env var names supplied by packaging metadata, not contract.yaml.
     required_env: list[str] = []
+
+    @model_validator(mode="after")
+    def _install_cmd_requires_bundle(self) -> "AgentSpec":
+        if self.install_cmd is not None and self.bundle is None:
+            raise ValueError(
+                "agent.install_cmd requires agent.bundle (prebaked task images need no install step)"
+            )
+        return self
 
 
 class EvalSpec(BaseModel):

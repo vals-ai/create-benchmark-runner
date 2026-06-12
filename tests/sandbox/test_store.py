@@ -6,6 +6,8 @@ import pytest
 
 from benchmark_service.sandbox import Resources
 from tests.sandbox.conftest import make_manifest
+from benchmark_runner.sandbox.bundle import build_bundle_zip, file_sha256
+from benchmark_runner.sandbox.manifest import BundleSpec
 from benchmark_runner.sandbox.store import (
     install_manifest,
     list_installed,
@@ -61,3 +63,50 @@ def test_pin_diff_reports_per_task_execution_pin_changes() -> None:
         f"tasks.task-1.resources: {old.tasks[0].resources} → {new.tasks[0].resources}",
         "tasks.task-1.problem_path: /app/problem.txt → /app/other_problem.txt",
     ]
+
+
+def _bundle_source(tmp_path: Path, name: str, payload: str) -> tuple[Path, str]:
+    agent = tmp_path / name / "agent"
+    agent.mkdir(parents=True)
+    (agent / "run.py").write_text(payload)
+    zip_path = tmp_path / name / "agent.zip"
+    sha256 = build_bundle_zip(agent, zip_path)
+    return zip_path, sha256
+
+
+def test_failed_reinstall_keeps_previous_bundle_usable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed manifest write during reinstall must not replace the old bundle
+    bytes that the currently installed manifest still pins."""
+    store = tmp_path / "benchmarks"
+    old_zip, old_sha = _bundle_source(tmp_path, "old", "old")
+    new_zip, new_sha = _bundle_source(tmp_path, "new", "new")
+
+    old_manifest = make_manifest("mybench", bundle=BundleSpec(file="agent.zip", sha256=old_sha))
+    install_manifest(old_manifest, store, bundle_src=old_zip)
+    old_installed = load_installed("mybench", store)
+    assert old_installed is not None and old_installed.agent.bundle is not None
+    old_bundle_path = store / old_installed.agent.bundle.file
+
+    original_write_text = Path.write_text
+
+    def fail_manifest_write(
+        path: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        if path == store / "mybench.manifest.yaml":
+            raise OSError("disk full")
+        return original_write_text(path, data, encoding=encoding, errors=errors, newline=newline)
+
+    monkeypatch.setattr(Path, "write_text", fail_manifest_write)
+
+    new_manifest = make_manifest("mybench", bundle=BundleSpec(file="agent.zip", sha256=new_sha))
+    with pytest.raises(OSError, match="disk full"):
+        install_manifest(new_manifest, store, bundle_src=new_zip)
+
+    assert file_sha256(old_bundle_path) == old_sha
+    assert load_installed("mybench", store) == old_installed

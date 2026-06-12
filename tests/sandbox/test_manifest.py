@@ -7,13 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import yaml
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from benchmark_service.sandbox import ImageSource, SnapshotSource, Resources
 from benchmark_service.schemas import RetrieveTaskResponse
 
 from benchmark_runner.sandbox.bundle import file_sha256
 from benchmark_runner.sandbox.cli import cli
-from benchmark_runner.sandbox.manifest import BundleSpec, Manifest, generate_manifest
+from benchmark_runner.sandbox.manifest import AgentSpec, BundleSpec, Manifest, generate_manifest
 
 
 def _make_contract(tmp_path: Path) -> Path:
@@ -170,6 +171,17 @@ async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
     # /version fields are direct copies (no cross-field fallback)
     assert manifest.service.framework_version == "1.0.0"
     assert manifest.service.service_version == "0.6.1"
+
+
+def test_agent_spec_rejects_install_cmd_without_bundle() -> None:
+    """An install command is valid only when a manifest pins a bundle."""
+    with pytest.raises(ValidationError, match="install_cmd requires agent.bundle"):
+        AgentSpec(
+            bundle=None,
+            install_cmd="bash setup.sh",
+            run_cmd="run --problem {problem_statement_path}",
+            final_output="/app/results",
+        )
 
 
 @pytest.mark.asyncio
@@ -330,13 +342,9 @@ def test_cli_manifest_packages_agent_bundle(
     the standard exclusions) or a PREBUILT ZIP (copied and pinned identically —
     e.g. the exact artifact internal runs used)."""
     source = ImageSource(image="registry.example.com/agent@sha256:" + "a" * 64)
-
-    class ImageClient(FakeClient):
-        def __init__(self) -> None:
-            super().__init__({"task-1": _make_retrieve_response(source)})
-
     monkeypatch.setattr(
-        "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: ImageClient()
+        "benchmark_runner.sandbox.cli.BenchmarkServiceClient",
+        lambda *a, **kw: FakeClient({"task-1": _make_retrieve_response(source)}),
     )
     monkeypatch.setattr(
         "benchmark_runner.sandbox.manifest._fetch_version", AsyncMock(return_value=None)

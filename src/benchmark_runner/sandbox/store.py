@@ -2,18 +2,22 @@
 
 A lab licenses multiple benchmarks; one orchestrator serves all of them.
 `benchmark add` installs a manifest at ``./benchmarks/<name>.manifest.yaml``
-(name = the manifest's ``benchmark`` field) and `benchmark run <name>` loads
-its pins from there. Pure functions over the Manifest model — no network.
+(name = the manifest's ``benchmark`` field) and its agent bundle at a
+content-addressed path under ``./benchmarks/``; `benchmark run <name>` loads
+its pins from there. Local filesystem only; no network.
 """
 
+import shutil
 from pathlib import Path
 
 import yaml
 
+from benchmark_runner.sandbox.bundle import verify_bundle
 from benchmark_runner.sandbox.manifest import Manifest
 
 DEFAULT_STORE_DIR = Path("benchmarks")
 MANIFEST_SUFFIX = ".manifest.yaml"
+BUNDLE_SUFFIX = ".bundle.zip"
 
 # The fields a lab pins a benchmark on: changing any of these on re-add means
 # the lab is now running a different artifact/dataset/version combination.
@@ -21,6 +25,7 @@ _PIN_FIELDS = (
     "dataset.name",
     "service.framework_version",
     "service.service_version",
+    "agent.bundle.sha256",
 )
 _TASK_PIN_FIELDS = ("image", "resources", "cwd", "timeout", "problem_path")
 
@@ -48,19 +53,38 @@ def load_installed(name: str, store_dir: Path = DEFAULT_STORE_DIR) -> Manifest |
     return load_manifest_file(path)
 
 
-def install_manifest(manifest: Manifest, store_dir: Path = DEFAULT_STORE_DIR) -> Path:
-    """Write `manifest` into the store (creating it), replacing any prior install."""
+def install_manifest(
+    manifest: Manifest,
+    store_dir: Path = DEFAULT_STORE_DIR,
+    *,
+    bundle_src: Path | None = None,
+) -> Path:
+    """Write `manifest` into the store, copying a pinned bundle when present."""
     store_dir.mkdir(parents=True, exist_ok=True)
+    bundle = manifest.agent.bundle
+    if bundle is not None:
+        if bundle_src is None:
+            raise ValueError(f"manifest {manifest.benchmark} pins an agent bundle; pass bundle_src")
+        verify_bundle(bundle_src, bundle.sha256)
+        dest = installed_bundle_path(manifest.benchmark, bundle.sha256, store_dir)
+        if dest.resolve() != bundle_src.resolve():
+            shutil.copyfile(bundle_src, dest)
+        installed_bundle = bundle.model_copy(update={"file": dest.name})
+        installed_agent = manifest.agent.model_copy(update={"bundle": installed_bundle})
+        manifest = manifest.model_copy(update={"agent": installed_agent})
     path = manifest_path(manifest.benchmark, store_dir)
     path.write_text(yaml.safe_dump(manifest.model_dump(), default_flow_style=False, sort_keys=False))
     return path
 
 
-def installed_bundle_path(manifest: Manifest, store_dir: Path = DEFAULT_STORE_DIR) -> Path:
-    """Where the installed copy of the manifest's bundle zip lives in the store."""
-    if manifest.agent.bundle is None:
-        raise ValueError(f"manifest {manifest.benchmark} declares no agent bundle")
-    return store_dir / Path(manifest.agent.bundle.file).name
+def installed_bundle_path(name: str, sha256: str, store_dir: Path = DEFAULT_STORE_DIR) -> Path:
+    """Where the installed copy of a benchmark's bundle zip lives in the store.
+
+    Namespaced by benchmark name and digest so reinstalling a new bundle cannot
+    mutate the bytes pinned by the currently installed manifest.
+    """
+    _validate_manifest_name(name)
+    return store_dir / f"{name}.{sha256}{BUNDLE_SUFFIX}"
 
 
 def list_installed(store_dir: Path = DEFAULT_STORE_DIR) -> list[Manifest]:
@@ -77,6 +101,8 @@ def pin_diff(old: Manifest, new: Manifest) -> list[str]:
     def _get(manifest: Manifest, dotted: str) -> object:
         obj: object = manifest
         for part in dotted.split("."):
+            if obj is None:
+                return None
             obj = getattr(obj, part)
         return obj
 
@@ -85,12 +111,6 @@ def pin_diff(old: Manifest, new: Manifest) -> list[str]:
         for field in _PIN_FIELDS
         if _get(old, field) != _get(new, field)
     ]
-
-    def _bundle_sha(manifest: Manifest) -> str:
-        return manifest.agent.bundle.sha256[:12] if manifest.agent.bundle else "none"
-
-    if _bundle_sha(old) != _bundle_sha(new):
-        changes.append(f"agent.bundle.sha256: {_bundle_sha(old)} → {_bundle_sha(new)}")
     old_tasks = {task.id: task for task in old.tasks}
     new_tasks = {task.id: task for task in new.tasks}
     for task_id in sorted(set(old_tasks) | set(new_tasks)):

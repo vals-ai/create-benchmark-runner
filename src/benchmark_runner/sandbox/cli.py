@@ -159,7 +159,10 @@ def run(
         if bundle_arg is not None:
             bundle = _load_bundle_arg(bundle_arg)
         elif mf is not None and mf.agent.bundle is not None:
-            bundle = load_bundle(installed_bundle_path(mf), expected_sha256=mf.agent.bundle.sha256)
+            bundle = load_bundle(
+                installed_bundle_path(mf.benchmark, mf.agent.bundle.sha256),
+                expected_sha256=mf.agent.bundle.sha256,
+            )
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -404,7 +407,7 @@ def manifest(
 
     click.echo(f"Manifest written to {output_path} ({len(mf.tasks)} tasks, benchmark={benchmark})")
     if bundle_spec is not None:
-        click.echo(f"  agent bundle: {bundle_spec.file} (sha256:{bundle_spec.sha256[:12]}…)")
+        click.echo(f"  agent bundle: {_bundle_summary(bundle_spec.file, bundle_spec.sha256)}")
 
 
 def _short_image_ref(image: str) -> str:
@@ -413,6 +416,10 @@ def _short_image_ref(image: str) -> str:
     if sep:
         return f"{repo}@sha256:{digest[:12]}"
     return image
+
+
+def _bundle_summary(file: str, sha256: str) -> str:
+    return f"{file} (sha256:{sha256[:12]}…)"
 
 
 def _image_summary(mf: Manifest) -> str:
@@ -431,23 +438,6 @@ def add(manifest_path: Path) -> None:
         mf = load_manifest_file(manifest_path)
     except Exception as exc:
         raise click.ClickException(f"invalid manifest {manifest_path}: {exc}") from exc
-
-    # Verify the bundle against its pin before touching the store; the installed
-    # manifest references the store copy by basename.
-    bundle_src: Path | None = None
-    if mf.agent.bundle is not None:
-        bundle_src = manifest_path.parent / mf.agent.bundle.file
-        try:
-            load_bundle(bundle_src, expected_sha256=mf.agent.bundle.sha256)
-        except ValueError as exc:
-            raise click.ClickException(str(exc)) from exc
-        mf = mf.model_copy(
-            update={
-                "agent": mf.agent.model_copy(
-                    update={"bundle": mf.agent.bundle.model_copy(update={"file": bundle_src.name})}
-                )
-            }
-        )
 
     # The pin diff needs the previously-installed copy, but an unreadable one
     # (e.g. written by an older manifest schema) must not block reinstalling —
@@ -470,16 +460,19 @@ def add(manifest_path: Path) -> None:
         else:
             click.echo(f"Replacing installed '{mf.benchmark}': no pin changes")
 
-    installed_path = install_manifest(mf)
-    if bundle_src is not None:
-        bundle_dest = installed_bundle_path(mf)
-        if bundle_dest.resolve() != bundle_src.resolve():
-            shutil.copyfile(bundle_src, bundle_dest)
+    bundle_src = (
+        manifest_path.parent / mf.agent.bundle.file if mf.agent.bundle is not None else None
+    )
+    try:
+        installed_path = install_manifest(mf, bundle_src=bundle_src)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"Installed {mf.benchmark} -> {installed_path}")
     click.echo(f"  dataset: {mf.dataset.name} ({len(mf.tasks)} tasks)")
     click.echo(f"  image: {_image_summary(mf)}")
     if mf.agent.bundle is not None:
-        click.echo(f"  agent bundle: {mf.agent.bundle.file} (sha256:{mf.agent.bundle.sha256[:12]}…)")
+        bundle_name = installed_bundle_path(mf.benchmark, mf.agent.bundle.sha256).name
+        click.echo(f"  agent bundle: {_bundle_summary(bundle_name, mf.agent.bundle.sha256)}")
     click.echo(f"  service version: {mf.service.service_version}, framework version: {mf.service.framework_version}")
 
 

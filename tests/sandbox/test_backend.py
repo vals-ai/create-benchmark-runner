@@ -5,6 +5,7 @@ import shlex
 from pathlib import Path
 
 from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
+from benchmark_runner.sandbox.bundle import AgentBundle
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.schemas import GenerationStatus
 
@@ -340,3 +341,29 @@ async def test_runtime_placeholders_are_shell_quoted(tmp_path: Path) -> None:
     run_cmd = sandbox.commands[-1]
     assert shlex.quote("/app/problems/task 1.txt; touch /tmp/pwned") in run_cmd
     assert shlex.quote("task weird; echo nope") in run_cmd
+
+
+async def test_bundle_installed_at_bundle_root(tmp_path: Path) -> None:
+    """Bundles extract under /bundle and install from their top-level directory."""
+    sandbox = FakeSandbox(download_bytes=_make_generation_json("task-1"))
+
+    result = await SandboxGenerationBackend().generate(
+        sandbox=sandbox,
+        contract=_make_contract(with_install=True),
+        task_id="task-1",
+        model="openai/gpt-5",
+        problem_path="/problems/task-1.json",
+        cwd="/app",
+        agent_timeout=None,
+        log_dir=tmp_path,
+        bundle=AgentBundle(root="my_agent", zip_bytes=b"zipbytes"),
+    )
+
+    assert result.status == GenerationStatus.SUCCESS
+    assert sandbox.uploads == [("/tmp/my_agent.zip", b"zipbytes")]
+    extract_cmd = next(c for c in sandbox.commands if "unzip" in c)
+    assert "rm -rf /bundle/my_agent" in extract_cmd
+    assert extract_cmd.index("rm -rf /bundle/my_agent") < extract_cmd.index("unzip -oq")
+    assert "-d /bundle" in extract_cmd
+    install_cmd = next(c for c in sandbox.commands if "setup.sh" in c)
+    assert install_cmd.startswith("cd /bundle/my_agent && ")

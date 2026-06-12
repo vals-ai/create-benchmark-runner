@@ -1,22 +1,14 @@
-"""Agent bundle packaging and loading.
-
-A bundle is a zip of the agent directory with exactly one top-level directory
-(the agent name). The orchestrator uploads it into each sandbox, extracts it
-to ``/bundle/<name>``, and runs the contract's install_cmd there — the same
-layout internal sandboxes use, so contracts whose run_cmd references
-``/bundle/<name>`` paths work unchanged on lab infra.
-"""
+"""Agent bundle packaging and loading."""
 
 import hashlib
 import zipfile
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-# In-sandbox directory bundles extract into; the agent lands at BUNDLE_DIR/<root>.
+# In-sandbox directory where bundles extract as BUNDLE_DIR/<root>.
 BUNDLE_DIR = "/bundle"
 
-# Never packaged: dev/VCS junk, plus the contract file itself — its lab-facing
-# fields already ship in the manifest, and it may reference internal-only tooling.
+# Never packaged: dev/VCS junk, plus the contract file itself.
 _EXCLUDED_NAMES = {
     "__pycache__",
     ".git",
@@ -43,11 +35,16 @@ class AgentBundle:
 
 
 def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
     with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+        return hashlib.file_digest(f, "sha256").hexdigest()
+
+
+def _digest_mismatch(zip_path: Path, expected: str, actual: str) -> ValueError:
+    return ValueError(
+        f"agent bundle {zip_path.name} digest mismatch: manifest pins "
+        f"sha256:{expected[:12]}… but the file is sha256:{actual[:12]}…; "
+        "re-install the benchmark or re-generate the manifest"
+    )
 
 
 def _excluded(rel: Path) -> bool:
@@ -60,6 +57,11 @@ def build_bundle_zip(agent_dir: Path, out_path: Path) -> str:
     """Zip ``agent_dir`` as ``<dirname>/...`` entries and return the zip's sha256."""
     if not agent_dir.is_dir():
         raise ValueError(f"agent bundle source {agent_dir} is not a directory")
+    if out_path.resolve().is_relative_to(agent_dir.resolve()):
+        raise ValueError(
+            f"bundle output {out_path} is inside the agent directory; a rerun would "
+            "absorb the previous zip into the bundle — write the manifest and zip elsewhere"
+        )
     root = agent_dir.name
     files = sorted(
         p
@@ -75,12 +77,21 @@ def build_bundle_zip(agent_dir: Path, out_path: Path) -> str:
 
 
 def zip_root(zip_path: Path) -> str:
-    """The single top-level directory inside a bundle zip (the agent name)."""
+    """The single top-level directory inside a bundle zip (the agent name).
+
+    Every entry must be a relative POSIX path under that directory.
+    """
     with zipfile.ZipFile(zip_path) as zf:
         names = zf.namelist()
-    tops = {name.split("/", 1)[0] for name in names}
-    loose_files = [name for name in names if "/" not in name]
-    if loose_files or len(tops) != 1:
+    tops: set[str] = set()
+    has_top_level_file = False
+    for name in names:
+        parts = PurePosixPath(name).parts
+        if not parts or name.startswith("/") or "\\" in name or ".." in parts:
+            raise ValueError(f"bundle zip {zip_path.name} has an unsafe entry path: {name!r}")
+        tops.add(parts[0])
+        has_top_level_file = has_top_level_file or (len(parts) == 1 and not name.endswith("/"))
+    if has_top_level_file or len(tops) != 1:
         raise ValueError(
             f"bundle zip {zip_path.name} must contain exactly one top-level directory "
             f"(found: {sorted(tops)}); re-create it with `benchmark manifest --agent-bundle <dir>`"
@@ -88,19 +99,26 @@ def zip_root(zip_path: Path) -> str:
     return next(iter(tops))
 
 
+def verify_bundle(zip_path: Path, expected_sha256: str) -> None:
+    """Check a bundle zip against its manifest pin: exists, digest matches, safe layout."""
+    if not zip_path.is_file():
+        raise ValueError(f"agent bundle {zip_path} does not exist")
+    actual = file_sha256(zip_path)
+    if actual != expected_sha256:
+        raise _digest_mismatch(zip_path, expected_sha256, actual)
+    zip_root(zip_path)
+
+
 def load_bundle(zip_path: Path, expected_sha256: str | None = None) -> AgentBundle:
     """Load a bundle zip for delivery into sandboxes, verifying its digest when given."""
     if not zip_path.is_file():
         raise ValueError(f"agent bundle {zip_path} does not exist")
+    zip_bytes = zip_path.read_bytes()
     if expected_sha256 is not None:
-        actual = file_sha256(zip_path)
+        actual = hashlib.sha256(zip_bytes).hexdigest()
         if actual != expected_sha256:
-            raise ValueError(
-                f"agent bundle {zip_path.name} digest mismatch: manifest pins "
-                f"sha256:{expected_sha256[:12]}… but the file is sha256:{actual[:12]}…; "
-                "re-install the benchmark or re-generate the manifest"
-            )
-    return AgentBundle(root=zip_root(zip_path), zip_bytes=zip_path.read_bytes())
+            raise _digest_mismatch(zip_path, expected_sha256, actual)
+    return AgentBundle(root=zip_root(zip_path), zip_bytes=zip_bytes)
 
 
 __all__ = [
@@ -109,5 +127,6 @@ __all__ = [
     "build_bundle_zip",
     "file_sha256",
     "load_bundle",
+    "verify_bundle",
     "zip_root",
 ]
