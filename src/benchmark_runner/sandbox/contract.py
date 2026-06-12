@@ -11,13 +11,6 @@ class AgentContract(BaseModel):
     install_cmd: str | None = None
     final_output: str | None = None
     secrets: dict[str, str] = {}
-    # Lab-facing env var NAMES a lab must supply for the agent to function
-    # (e.g. tool API keys). This is the ONLY env list a manifest publishes —
-    # `secrets` above maps to Vals-internal secret references and never leaves
-    # Vals infra. Declared deliberately by the agent author; default empty so
-    # nothing is published by accident. Model access is NOT declared here: labs
-    # use CUSTOM_ENDPOINT/CUSTOM_API_KEY, forwarded unconditionally.
-    required_env: list[str] = []
     defaults: dict[str, Any] = {}
 
     @field_validator("run_cmd")

@@ -24,8 +24,7 @@ class AgentSpec(BaseModel):
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
-    # Env var NAMES the lab must set for the agent to function. Sourced from the
-    # contract's explicit `required_env` declaration; internal secrets never ship.
+    # Lab-facing env var names supplied by packaging metadata, not contract.yaml.
     required_env: list[str] = []
 
 
@@ -93,10 +92,11 @@ async def generate_manifest(
     contract_path: Path,
     benchmark: str,
     payload_schema: str | None = None,
+    required_env: list[str] | None = None,
 ) -> Manifest:
     """Generate a self-contained benchmark manifest for lab-hosted consumers.
 
-    payload_schema defaults to ``{benchmark}.text.v1``.
+    payload_schema defaults to ``{benchmark}.text.v1``; required_env comes from packaging metadata.
     """
     payload_schema = payload_schema or f"{benchmark}.text.v1"
 
@@ -151,7 +151,7 @@ async def generate_manifest(
             service_version=version_resp.service_version if version_resp else None,
         ),
         dataset=DatasetSpec(name=dataset),
-        agent=_agent_spec(contract_path),
+        agent=_agent_spec(contract_path, required_env=required_env),
         # Vals-internal eval endpoints by design: the /v1 eval surface is deferred.
         # Regenerate with /v1/evaluate + /v1/score once it ships.
         eval=EvalSpec(
@@ -163,14 +163,13 @@ async def generate_manifest(
     )
 
 
-def _agent_spec(contract_path: Path) -> AgentSpec:
+def _agent_spec(contract_path: Path, *, required_env: list[str] | None = None) -> AgentSpec:
     c = AgentContract.from_yaml(contract_path)
     return AgentSpec(
         install_cmd=c.install_cmd,
         run_cmd=c.run_cmd,
         final_output=c.final_output,
-        # Only the explicit lab-facing declaration — the internal `secrets` map never ships.
-        required_env=sorted(c.required_env),
+        required_env=sorted(set(required_env or [])),
     )
 
 
