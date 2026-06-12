@@ -44,6 +44,10 @@ class FakeSandbox:
         self.commands: list[str] = []
         self.timeouts: list[float | None] = []
         self.download_path: str | None = None
+        self.uploads: list[tuple[str, bytes]] = []
+
+    async def upload_file(self, remote_path: str, content: bytes) -> None:
+        self.uploads.append((remote_path, content))
 
     async def exec(self, command: str, *, cwd: str | None = None, timeout: float | None = None) -> FakeExecResult:
         self.commands.append(command)

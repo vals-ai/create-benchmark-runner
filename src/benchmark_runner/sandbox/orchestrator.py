@@ -14,6 +14,7 @@ from benchmark_service.sandbox.types import ImageSource, Resources, SandboxSourc
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
 from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
+from benchmark_runner.sandbox.bundle import AgentBundle
 from benchmark_runner.sandbox.contract import AgentContract, format_run_cmd
 from benchmark_runner.sandbox.protocols import BenchmarkServiceClientLike, SandboxProviderLike
 from benchmark_runner.schemas import (
@@ -132,10 +133,15 @@ async def run_benchmark(
     source_override: ImageSource | None = None,
     task_specs: Mapping[str, SandboxTaskSpec] | None = None,
     skip_eval: bool = False,
+    bundle: AgentBundle | None = None,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
     Handles resume: skips generation/eval if valid artifacts already exist.
+
+    bundle: agent bundle delivered into every sandbox and extracted to
+    /bundle/<root> before install_cmd runs there; None means the task images
+    prebake the agent.
 
     skip_eval: generation only — no per-task evaluation and no final score, so
     generation can be sliced across invocations/machines into one shared
@@ -253,6 +259,7 @@ async def run_benchmark(
                     cwd=cwd,
                     agent_timeout=agent_timeout,
                     log_dir=artifacts.agent_logs_dir(tid),
+                    bundle=bundle,
                 )
             finally:
                 try:

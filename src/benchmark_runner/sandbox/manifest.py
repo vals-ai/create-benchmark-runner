@@ -20,7 +20,20 @@ from benchmark_runner.sandbox.contract import AgentContract
 logger = logging.getLogger(__name__)
 
 
+class BundleSpec(BaseModel):
+    """Pin for the agent bundle zip delivered alongside the manifest.
+
+    ``file`` is relative to the manifest's own location. The orchestrator
+    extracts the zip to /bundle/<its top-level dir> in every sandbox and runs
+    install_cmd there; no bundle means the task images prebake the agent.
+    """
+
+    file: str
+    sha256: str
+
+
 class AgentSpec(BaseModel):
+    bundle: BundleSpec | None = None
     install_cmd: str | None
     run_cmd: str
     final_output: str | None
@@ -93,10 +106,12 @@ async def generate_manifest(
     benchmark: str,
     payload_schema: str | None = None,
     required_env: list[str] | None = None,
+    bundle: BundleSpec | None = None,
 ) -> Manifest:
     """Generate a self-contained benchmark manifest for lab-hosted consumers.
 
-    payload_schema defaults to ``{benchmark}.text.v1``; required_env comes from packaging metadata.
+    payload_schema defaults to ``{benchmark}.text.v1``; required_env and bundle
+    come from packaging metadata.
     """
     payload_schema = payload_schema or f"{benchmark}.text.v1"
 
@@ -151,7 +166,7 @@ async def generate_manifest(
             service_version=version_resp.service_version if version_resp else None,
         ),
         dataset=DatasetSpec(name=dataset),
-        agent=_agent_spec(contract_path, required_env=required_env),
+        agent=_agent_spec(contract_path, required_env=required_env, bundle=bundle),
         # Vals-internal eval endpoints by design: the /v1 eval surface is deferred.
         # Regenerate with /v1/evaluate + /v1/score once it ships.
         eval=EvalSpec(
@@ -163,14 +178,26 @@ async def generate_manifest(
     )
 
 
-def _agent_spec(contract_path: Path, *, required_env: list[str] | None = None) -> AgentSpec:
+def _agent_spec(
+    contract_path: Path,
+    *,
+    required_env: list[str] | None = None,
+    bundle: BundleSpec | None = None,
+) -> AgentSpec:
     c = AgentContract.from_yaml(contract_path)
+    install_cmd = c.install_cmd
+    # install_cmd means "install the bundle"; without one (prebaked task images)
+    # there is nothing to install and shipping it would fail in every sandbox.
+    if bundle is None and install_cmd is not None:
+        logger.warning("no agent bundle: dropping contract install_cmd %r", install_cmd)
+        install_cmd = None
     return AgentSpec(
-        install_cmd=c.install_cmd,
+        bundle=bundle,
+        install_cmd=install_cmd,
         run_cmd=c.run_cmd,
         final_output=c.final_output,
         required_env=sorted(set(required_env or [])),
     )
 
 
-__all__ = ["Manifest", "generate_manifest", "_fetch_version"]
+__all__ = ["BundleSpec", "Manifest", "generate_manifest", "_fetch_version"]

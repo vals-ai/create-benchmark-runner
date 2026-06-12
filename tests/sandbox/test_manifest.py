@@ -1,5 +1,6 @@
 """Behavioral tests for the manifest generator."""
 
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -10,8 +11,9 @@ from click.testing import CliRunner
 from benchmark_service.sandbox import ImageSource, SnapshotSource, Resources
 from benchmark_service.schemas import RetrieveTaskResponse
 
+from benchmark_runner.sandbox.bundle import file_sha256
 from benchmark_runner.sandbox.cli import cli
-from benchmark_runner.sandbox.manifest import Manifest, generate_manifest
+from benchmark_runner.sandbox.manifest import BundleSpec, Manifest, generate_manifest
 
 
 def _make_contract(tmp_path: Path) -> Path:
@@ -132,10 +134,12 @@ async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
         contract_path=contract_path,
         benchmark="mybench",
         required_env=["GOOGLE_API_KEY"],
+        bundle=BundleSpec(file="my_agent.zip", sha256="b" * 64),
     )
 
     # Agent fields must not expose internal secret-manager references.
-    assert manifest.agent.install_cmd == "pip install -e ."
+    assert manifest.agent.bundle == BundleSpec(file="my_agent.zip", sha256="b" * 64)
+    assert manifest.agent.install_cmd == "pip install -e ."  # ships with a bundle
     assert manifest.agent.final_output == "/app/results"
     assert "{problem_statement_path}" in manifest.agent.run_cmd
     assert manifest.agent.required_env == ["GOOGLE_API_KEY"]
@@ -166,6 +170,25 @@ async def test_generator_fully_populates_every_task(tmp_path: Path) -> None:
     # /version fields are direct copies (no cross-field fallback)
     assert manifest.service.framework_version == "1.0.0"
     assert manifest.service.service_version == "0.6.1"
+
+
+@pytest.mark.asyncio
+async def test_install_cmd_dropped_without_bundle(tmp_path: Path) -> None:
+    """install_cmd means "install the bundle": with no bundle pinned (prebaked
+    task images) it is dropped, so labs never run an install step that has
+    nothing to install."""
+    client = FakeClient(
+        {"task-1": _make_retrieve_response(ImageSource(image="registry.example.com/agent:1.0"))}
+    )
+    manifest = await generate_manifest(
+        client=client,
+        service_url="http://svc",
+        dataset="my-dataset",
+        contract_path=_make_contract(tmp_path),
+        benchmark="mybench",
+    )
+    assert manifest.agent.bundle is None
+    assert manifest.agent.install_cmd is None
 
 
 @pytest.mark.asyncio
@@ -298,6 +321,65 @@ def test_cli_manifest_accepts_lab_required_env(
         "COURTLISTENER_API_KEY",
         "TAVILY_API_KEY",
     ]
+
+
+def test_cli_manifest_packages_agent_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--agent-bundle accepts an agent DIRECTORY (zipped next to the manifest with
+    the standard exclusions) or a PREBUILT ZIP (copied and pinned identically —
+    e.g. the exact artifact internal runs used)."""
+    source = ImageSource(image="registry.example.com/agent@sha256:" + "a" * 64)
+
+    class ImageClient(FakeClient):
+        def __init__(self) -> None:
+            super().__init__({"task-1": _make_retrieve_response(source)})
+
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: ImageClient()
+    )
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.manifest._fetch_version", AsyncMock(return_value=None)
+    )
+
+    agent_dir = tmp_path / "my_agent"
+    agent_dir.mkdir()
+    (agent_dir / "setup.sh").write_text("true")
+    (agent_dir / "contract.yaml").write_text("internal: true")
+    contract_path = _make_contract(tmp_path)
+
+    def _generate(bundle_arg: Path, output_path: Path) -> Manifest:
+        result = CliRunner().invoke(
+            cli,
+            [
+                "manifest",
+                "--service-url", "http://svc",
+                "--dataset", "my-dataset",
+                "--contract", str(contract_path),
+                "--benchmark", "mybench",
+                "--agent-bundle", str(bundle_arg),
+                "--output", str(output_path),
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        return Manifest.model_validate(yaml.safe_load(output_path.read_text()))
+
+    out_dir = tmp_path / "deliverable"
+    mf = _generate(agent_dir, out_dir / "manifest.yaml")
+    zip_path = out_dir / "my_agent.zip"
+    assert mf.agent.bundle is not None
+    assert mf.agent.bundle.file == "my_agent.zip"
+    assert mf.agent.bundle.sha256 == file_sha256(zip_path)
+    assert mf.agent.install_cmd == "pip install -e ."  # contract install_cmd ships with a bundle
+    names = zipfile.ZipFile(zip_path).namelist()
+    assert "my_agent/setup.sh" in names
+    assert "my_agent/contract.yaml" not in names
+
+    out_dir2 = tmp_path / "deliverable2"
+    mf2 = _generate(zip_path, out_dir2 / "manifest.yaml")
+    assert mf2.agent.bundle is not None
+    assert mf2.agent.bundle.sha256 == mf.agent.bundle.sha256
+    assert (out_dir2 / "my_agent.zip").exists()
 
 
 @pytest.mark.asyncio

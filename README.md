@@ -93,7 +93,7 @@ class SWEBenchRunner(BenchmarkRunner):
 
 ## Sandbox orchestrator
 
-`benchmark run` drives the full benchmark loop with one sandbox per task: create a sandbox from a registry image → write the problem statement into it → run the agent per the contract (`install_cmd`, then `run_cmd`) → download `<final_output>/<task_id>/generation.json` → delete the sandbox → eval/score through the service. Only pullable registry images are supported as sandbox sources (no Daytona snapshots).
+`benchmark run` drives the full benchmark loop with one sandbox per task: create a sandbox from a registry image → write the problem statement into it → install the agent bundle, when one is pinned (upload the zip, extract to `/bundle/<name>`, run `install_cmd` there) → run the agent per the contract (`run_cmd`) → download `<final_output>/<task_id>/generation.json` → delete the sandbox → eval/score through the service. Only pullable registry images are supported as sandbox sources (no Daytona snapshots).
 
 The sandbox backend is pluggable. The default is Daytona, built by the cbs client from `DAYTONA_API_KEY`/`DAYTONA_API_URL`/`DAYTONA_TARGET`; any other backend plugs in as a provider object.
 
@@ -184,7 +184,7 @@ The orchestrator loop itself uses a narrow core of that interface. Implement the
 |---|---|---|
 | `provider.create_sandbox(request)` | once per task | `request.source` is always an `ImageSource` (snapshots are rejected before the provider sees them). `request.env_vars` must reach the agent process env — it carries the contract-declared secrets. `request.name` is `{run_id}-{task_id}`. Raise on failure: the task is recorded as a generation ERROR. |
 | `sandbox.exec(command)` | cwd mkdir, install, agent run | `command` is a shell string (`cd X && …`, `timeout N …`) — run it through a shell. Return `ExecResult(exit_code, output)` with stderr merged into `output` (on a nonzero exit, `output` becomes the recorded error text). Exit code `124` must propagate untouched — it classifies the task as MAX_TIME rather than ERROR. The orchestrator never passes `cwd=`/`timeout=` kwargs; both are baked into the command string. |
-| `sandbox.upload_file(path, content)` | task setup | Writes the problem statement into the sandbox; `path` is absolute. Manifest-native runs upload it directly; callback runs do the same write service-side through this interface. |
+| `sandbox.upload_file(path, content)` | task setup | Writes the problem statement — and the agent bundle zip, when one is pinned — into the sandbox; `path` is absolute. Manifest-native runs upload directly; callback runs do the same write service-side through this interface. |
 | `sandbox.download_file(path)` | after the agent run | MUST raise when the file is missing — an absent `generation.json` is how a failed run is classified. Returning empty bytes would silently corrupt results. |
 | `provider.delete_sandbox(id)` | always, in a `finally` | Best-effort cleanup; failures are logged, not fatal. |
 

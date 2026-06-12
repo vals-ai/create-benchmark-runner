@@ -56,6 +56,13 @@ def install_manifest(manifest: Manifest, store_dir: Path = DEFAULT_STORE_DIR) ->
     return path
 
 
+def installed_bundle_path(manifest: Manifest, store_dir: Path = DEFAULT_STORE_DIR) -> Path:
+    """Where the installed copy of the manifest's bundle zip lives in the store."""
+    if manifest.agent.bundle is None:
+        raise ValueError(f"manifest {manifest.benchmark} declares no agent bundle")
+    return store_dir / Path(manifest.agent.bundle.file).name
+
+
 def list_installed(store_dir: Path = DEFAULT_STORE_DIR) -> list[Manifest]:
     """All installed manifests, sorted by filename. Empty/missing store → []."""
     if not store_dir.is_dir():
@@ -78,6 +85,12 @@ def pin_diff(old: Manifest, new: Manifest) -> list[str]:
         for field in _PIN_FIELDS
         if _get(old, field) != _get(new, field)
     ]
+
+    def _bundle_sha(manifest: Manifest) -> str:
+        return manifest.agent.bundle.sha256[:12] if manifest.agent.bundle else "none"
+
+    if _bundle_sha(old) != _bundle_sha(new):
+        changes.append(f"agent.bundle.sha256: {_bundle_sha(old)} → {_bundle_sha(new)}")
     old_tasks = {task.id: task for task in old.tasks}
     new_tasks = {task.id: task for task in new.tasks}
     for task_id in sorted(set(old_tasks) | set(new_tasks)):
@@ -97,6 +110,7 @@ def pin_diff(old: Manifest, new: Manifest) -> list[str]:
 __all__ = [
     "DEFAULT_STORE_DIR",
     "install_manifest",
+    "installed_bundle_path",
     "list_installed",
     "load_installed",
     "load_manifest_file",

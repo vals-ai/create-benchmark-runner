@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+import shutil
+import tempfile
 from pathlib import Path
 
 import click
@@ -12,8 +14,15 @@ from benchmark_service.client import BenchmarkServiceClient
 from benchmark_service.sandbox.types import ImageSource
 
 from benchmark_runner.client import auth_headers
+from benchmark_runner.sandbox.bundle import (
+    AgentBundle,
+    build_bundle_zip,
+    file_sha256,
+    load_bundle,
+    zip_root,
+)
 from benchmark_runner.sandbox.contract import AgentContract
-from benchmark_runner.sandbox.manifest import Manifest, generate_manifest
+from benchmark_runner.sandbox.manifest import BundleSpec, Manifest, generate_manifest
 from benchmark_runner.sandbox.orchestrator import (
     SandboxTaskSpec,
     evaluate_run,
@@ -22,6 +31,7 @@ from benchmark_runner.sandbox.orchestrator import (
 )
 from benchmark_runner.sandbox.store import (
     install_manifest,
+    installed_bundle_path,
     list_installed,
     load_installed,
     load_manifest_file,
@@ -63,6 +73,16 @@ def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
     }
 
 
+def _load_bundle_arg(path: Path) -> AgentBundle:
+    """--bundle accepts a prebuilt zip or an agent directory (zipped on the fly)."""
+    if path.is_dir():
+        with tempfile.TemporaryDirectory() as tmp:
+            zip_path = Path(tmp) / f"{path.name}.zip"
+            build_bundle_zip(path, zip_path)
+            return load_bundle(zip_path)
+    return load_bundle(path)
+
+
 @cli.command()
 @click.option("--model", required=True, help="Model identifier")
 @click.option("--run-id", required=True, help="Unique run identifier")
@@ -74,6 +94,7 @@ def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
 @click.option("--image", default=None, help="Override: boot every sandbox from this registry image (e.g. to validate a candidate agent build) instead of the source retrieve_task returns. Eval still uses the service.")
 @click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for service calls incl. the eval judge. Default 1800; the rubric judge can take minutes, and the 60s client default times out (httpx.ReadTimeout) on slow tasks.")
 @click.option("--skip-eval", is_flag=True, help="Generation only: skip per-task evaluation and the final score. Evaluate later with `benchmark eval`, then `benchmark score` — lets generation be sliced across invocations into one shared results/<run_id>/.")
+@click.option("--bundle", "bundle_arg", default=None, type=click.Path(exists=True, path_type=Path), help="Agent bundle (zip, or a directory zipped on the fly) installed into each sandbox at /bundle/<name>. Overrides the manifest's pinned bundle — e.g. to run a custom agent against pinned tasks.")
 @click.argument("args", nargs=-1)
 def run(
     model: str,
@@ -86,6 +107,7 @@ def run(
     image: str | None,
     eval_timeout: int,
     skip_eval: bool,
+    bundle_arg: Path | None,
     args: tuple[str, ...],
 ) -> None:
     """Run the sandbox orchestrator.
@@ -102,6 +124,7 @@ def run(
     agent_contract: AgentContract | None = None
     contract_path: Path | None = None
     task_specs: dict[str, SandboxTaskSpec] | None = None
+    mf: Manifest | None = None
     if contract is not None:
         # Direct mode: every positional is a task id (unchanged behavior).
         if not args:
@@ -128,6 +151,17 @@ def run(
         service_url = service_url or mf.service.url
         dataset = dataset or mf.dataset.name
         results_dir = str(Path(results_dir) / mf.benchmark)
+
+    # Resolve the agent bundle before booting anything: an explicit --bundle wins,
+    # else the manifest's pin (digest-verified against the installed copy).
+    bundle: AgentBundle | None = None
+    try:
+        if bundle_arg is not None:
+            bundle = _load_bundle_arg(bundle_arg)
+        elif mf is not None and mf.agent.bundle is not None:
+            bundle = load_bundle(installed_bundle_path(mf), expected_sha256=mf.agent.bundle.sha256)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     headers = auth_headers()
 
@@ -158,6 +192,7 @@ def run(
             source_override=source_override,
             task_specs=task_specs,
             skip_eval=skip_eval,
+            bundle=bundle,
         )
     )
 
@@ -289,6 +324,21 @@ def score(
     )
 
 
+def _package_bundle(source: Path, out_dir: Path) -> BundleSpec:
+    """Build (directory) or copy (prebuilt zip) the agent bundle next to the manifest."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if source.is_dir():
+        zip_path = out_dir / f"{source.name}.zip"
+        sha256 = build_bundle_zip(source, zip_path)
+    else:
+        zip_root(source)  # layout check before accepting a prebuilt zip
+        zip_path = out_dir / source.name
+        if zip_path.resolve() != source.resolve():
+            shutil.copyfile(source, zip_path)
+        sha256 = file_sha256(zip_path)
+    return BundleSpec(file=zip_path.name, sha256=sha256)
+
+
 @cli.command()
 @click.option("--service-url", default=None, help="Benchmark service URL (falls back to $SERVICE_URL)")
 @click.option("--dataset", required=True, help="Dataset name")
@@ -299,6 +349,15 @@ def score(
     multiple=True,
     help="Lab-facing env var required by the agent. Repeat for multiple values.",
 )
+@click.option(
+    "--agent-bundle",
+    "agent_bundle",
+    default=None,
+    type=click.Path(exists=True, path_type=Path),
+    help="Agent directory (zipped with the standard exclusions) or prebuilt bundle zip; "
+    "written next to the manifest and pinned by sha256. Omit only for benchmarks whose "
+    "task images prebake the agent — without a bundle the contract's install_cmd is dropped.",
+)
 @click.option("--output", required=True, help="Output path for the manifest YAML")
 def manifest(
     service_url: str | None,
@@ -306,10 +365,21 @@ def manifest(
     contract: str,
     benchmark: str,
     required_env: tuple[str, ...],
+    agent_bundle: Path | None,
     output: str,
 ) -> None:
     """Generate a self-contained benchmark manifest for lab-hosted consumers."""
     service_url = service_url or os.environ.get("SERVICE_URL", "")
+    output_path = Path(output)
+
+    # Package the bundle before any network work: a bad agent dir/zip fails here.
+    bundle_spec: BundleSpec | None = None
+    if agent_bundle is not None:
+        try:
+            bundle_spec = _package_bundle(agent_bundle, output_path.parent)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+
     headers = auth_headers()
     client = BenchmarkServiceClient(service_url, headers=headers)
 
@@ -322,6 +392,7 @@ def manifest(
                 contract_path=Path(contract),
                 benchmark=benchmark,
                 required_env=list(required_env),
+                bundle=bundle_spec,
             )
         )
     except ValueError as exc:
@@ -329,10 +400,11 @@ def manifest(
         # produce a valid lab-hosted manifest; surface it cleanly (exit non-zero).
         raise click.ClickException(str(exc)) from exc
 
-    output_path = Path(output)
     output_path.write_text(yaml.safe_dump(mf.model_dump(), default_flow_style=False, sort_keys=False))
 
     click.echo(f"Manifest written to {output_path} ({len(mf.tasks)} tasks, benchmark={benchmark})")
+    if bundle_spec is not None:
+        click.echo(f"  agent bundle: {bundle_spec.file} (sha256:{bundle_spec.sha256[:12]}…)")
 
 
 def _short_image_ref(image: str) -> str:
@@ -354,11 +426,28 @@ def _image_summary(mf: Manifest) -> str:
 @cli.command()
 @click.argument("manifest_path", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def add(manifest_path: Path) -> None:
-    """Install a benchmark manifest into the project-local ./benchmarks store."""
+    """Install a benchmark manifest (and its agent bundle) into the project-local ./benchmarks store."""
     try:
         mf = load_manifest_file(manifest_path)
     except Exception as exc:
         raise click.ClickException(f"invalid manifest {manifest_path}: {exc}") from exc
+
+    # Verify the bundle against its pin before touching the store; the installed
+    # manifest references the store copy by basename.
+    bundle_src: Path | None = None
+    if mf.agent.bundle is not None:
+        bundle_src = manifest_path.parent / mf.agent.bundle.file
+        try:
+            load_bundle(bundle_src, expected_sha256=mf.agent.bundle.sha256)
+        except ValueError as exc:
+            raise click.ClickException(str(exc)) from exc
+        mf = mf.model_copy(
+            update={
+                "agent": mf.agent.model_copy(
+                    update={"bundle": mf.agent.bundle.model_copy(update={"file": bundle_src.name})}
+                )
+            }
+        )
 
     # The pin diff needs the previously-installed copy, but an unreadable one
     # (e.g. written by an older manifest schema) must not block reinstalling —
@@ -382,9 +471,15 @@ def add(manifest_path: Path) -> None:
             click.echo(f"Replacing installed '{mf.benchmark}': no pin changes")
 
     installed_path = install_manifest(mf)
+    if bundle_src is not None:
+        bundle_dest = installed_bundle_path(mf)
+        if bundle_dest.resolve() != bundle_src.resolve():
+            shutil.copyfile(bundle_src, bundle_dest)
     click.echo(f"Installed {mf.benchmark} -> {installed_path}")
     click.echo(f"  dataset: {mf.dataset.name} ({len(mf.tasks)} tasks)")
     click.echo(f"  image: {_image_summary(mf)}")
+    if mf.agent.bundle is not None:
+        click.echo(f"  agent bundle: {mf.agent.bundle.file} (sha256:{mf.agent.bundle.sha256[:12]}…)")
     click.echo(f"  service version: {mf.service.service_version}, framework version: {mf.service.framework_version}")
 
 

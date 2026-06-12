@@ -10,8 +10,9 @@ from click.testing import CliRunner
 from benchmark_service.sandbox import Resources
 from benchmark_service.sandbox.types import ImageSource
 from tests.sandbox.conftest import make_manifest
+from benchmark_runner.sandbox.bundle import build_bundle_zip
 from benchmark_runner.sandbox.cli import cli
-from benchmark_runner.sandbox.manifest import AgentSpec, DatasetSpec, EvalSpec, Manifest, ServiceSpec, TaskEntry
+from benchmark_runner.sandbox.manifest import AgentSpec, BundleSpec, DatasetSpec, EvalSpec, Manifest, ServiceSpec, TaskEntry
 from benchmark_runner.sandbox.store import install_manifest
 
 
@@ -226,3 +227,93 @@ def test_add_and_list_flow(tmp_path: Path) -> None:
         assert "mybench" in result.output
         assert "b" * 12 in result.output  # short digest shown ...
         assert "b" * 64 not in result.output  # ... not the full one
+
+def _write_bundled_manifest(name: str = "mybench", sha256: str | None = None) -> None:
+    """In the CliRunner cwd: an agent dir, its bundle zip, and a manifest pinning it."""
+    agent_dir = Path("my_agent")
+    agent_dir.mkdir()
+    (agent_dir / "setup.sh").write_text("true")
+    built_sha = build_bundle_zip(agent_dir, Path("my_agent.zip"))
+    mf = make_manifest(name, bundle=BundleSpec(file="my_agent.zip", sha256=sha256 or built_sha))
+    Path(f"{name}.yaml").write_text(yaml.safe_dump(mf.model_dump(), sort_keys=False))
+
+
+def test_add_and_run_deliver_pinned_bundle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`add` verifies + copies the pinned bundle into the store; `run` loads the
+    installed copy (digest-checked) and hands it to run_benchmark; a tampered
+    store copy fails the run instead of shipping modified agent code."""
+    calls: list[dict] = []
+
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
+        calls.append(kwargs)
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: MagicMock()
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        _write_bundled_manifest()
+
+        result = runner.invoke(cli, ["add", "mybench.yaml"])
+        assert result.exit_code == 0, result.output
+        assert "agent bundle: my_agent.zip" in result.output
+        assert Path("benchmarks/my_agent.zip").exists()
+
+        result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r", "mybench"])
+        assert result.exit_code == 0, result.output
+        (call,) = calls
+        assert call["bundle"].root == "my_agent"
+        assert call["bundle"].zip_bytes == Path("benchmarks/my_agent.zip").read_bytes()
+
+        Path("benchmarks/my_agent.zip").write_bytes(b"tampered")
+        result = runner.invoke(cli, ["run", "--model", "m", "--run-id", "r2", "mybench"])
+        assert result.exit_code != 0
+        assert "digest mismatch" in result.output
+
+
+def test_add_rejects_bundle_digest_mismatch(tmp_path: Path) -> None:
+    """A bundle that does not match the manifest's pin fails `add` before
+    anything is installed."""
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        _write_bundled_manifest(sha256="0" * 64)
+
+        result = runner.invoke(cli, ["add", "mybench.yaml"])
+        assert result.exit_code != 0
+        assert "digest mismatch" in result.output
+        assert not Path("benchmarks/mybench.manifest.yaml").exists()
+
+
+def test_run_bundle_flag_zips_directory(
+    contract_file: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--bundle with an agent DIRECTORY zips it on the fly and passes it through
+    — the dev/custom-agent path needs no manifest or prebuilt zip."""
+    calls: list[dict] = []
+
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
+        calls.append(kwargs)
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: MagicMock()
+    )
+
+    agent_dir = tmp_path / "custom_agent"
+    agent_dir.mkdir()
+    (agent_dir / "run.py").write_text("x = 1")
+
+    result = CliRunner().invoke(
+        cli,
+        ["run", "--model", "m", "--run-id", "r", "--contract", contract_file,
+         "--bundle", str(agent_dir), "t1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call["bundle"].root == "custom_agent"
+    assert call["bundle"].zip_bytes  # the on-the-fly zip made it through
