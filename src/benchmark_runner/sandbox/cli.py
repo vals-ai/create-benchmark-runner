@@ -167,28 +167,31 @@ def _resolve_results_target(
     service_url: str | None,
     dataset: str | None,
     results_dir: str,
+    *,
+    direct: bool = False,
 ) -> tuple[str, str | None, str, list[str], Manifest | None]:
-    """Mode resolution for eval/score, mirroring `run`'s manifest mode: when the
-    first ARG names an installed benchmark, service URL and dataset come from the
-    manifest and results nest under <results-dir>/<benchmark>; otherwise every
-    ARG is a task id and the service comes from --service-url/$SERVICE_URL.
-    """
-    if args:
-        mf = load_installed(args[0])
-        if mf is not None:
-            return (
-                service_url or mf.service.url,
-                dataset or mf.dataset.name,
-                str(Path(results_dir) / mf.benchmark),
-                list(args[1:]),
-                mf,
-            )
+    """Resolve eval/score target from either an installed benchmark or direct task ids."""
+    if direct or not args:
+        return (
+            service_url or os.environ.get("SERVICE_URL", ""),
+            dataset,
+            results_dir,
+            list(args),
+            None,
+        )
+    mf = load_installed(args[0])
+    if mf is None:
+        installed = ", ".join(m.benchmark for m in list_installed()) or "none"
+        raise click.ClickException(
+            f"benchmark '{args[0]}' is not installed (installed: {installed}); "
+            "install it with `benchmark add <manifest.yaml>` or pass --direct for task ids"
+        )
     return (
-        service_url or os.environ.get("SERVICE_URL", ""),
-        dataset,
-        results_dir,
-        list(args),
-        None,
+        service_url or mf.service.url,
+        dataset or mf.dataset.name,
+        str(Path(results_dir) / mf.benchmark),
+        list(args[1:]),
+        mf,
     )
 
 
@@ -199,6 +202,7 @@ def _resolve_results_target(
 @click.option("--service-url", default=None, help="Benchmark service URL (direct mode: falls back to $SERVICE_URL; manifest mode: overrides the manifest's service.url)")
 @click.option("--parallelism", default=10, type=int, help="Number of concurrent evaluation calls")
 @click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for the eval judge; see `run --eval-timeout`.")
+@click.option("--direct", is_flag=True, help="Treat ARGS as direct task ids instead of an installed benchmark name")
 @click.argument("args", nargs=-1)
 def eval_cmd(
     run_id: str,
@@ -207,18 +211,18 @@ def eval_cmd(
     service_url: str | None,
     parallelism: int,
     eval_timeout: int,
+    direct: bool,
     args: tuple[str, ...],
 ) -> None:
     """Evaluate a run's existing generations, without re-running generation.
 
     Manifest mode: the first ARG is an installed benchmark name; remaining ARGS
-    are task ids. Direct mode: every ARG is a task id. With no task ids, every
-    task with a generation.json under results/<run_id>/ is evaluated, so
-    generation slices from separate `run --skip-eval` invocations are all picked
-    up. Tasks that already evaluated cleanly are skipped (resume).
+    are task ids. Direct mode: pass --direct to treat ARGS as task ids. With no
+    task ids, every task with a generation.json under results/<run_id>/ is
+    evaluated. Tasks that already evaluated cleanly are skipped (resume).
     """
     service_url, dataset, results_dir, task_ids, _ = _resolve_results_target(
-        args, service_url, dataset, results_dir
+        args, service_url, dataset, results_dir, direct=direct
     )
     client = BenchmarkServiceClient(service_url, headers=auth_headers(), timeout=eval_timeout)
     try:
@@ -242,6 +246,7 @@ def eval_cmd(
 @click.option("--results-dir", default="results", help="Results root directory")
 @click.option("--service-url", default=None, help="Benchmark service URL (direct mode: falls back to $SERVICE_URL; manifest mode: overrides the manifest's service.url)")
 @click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for the final-score call.")
+@click.option("--direct", is_flag=True, help="Treat ARGS as direct task ids instead of an installed benchmark name")
 @click.argument("args", nargs=-1)
 def score(
     run_id: str,
@@ -249,6 +254,7 @@ def score(
     results_dir: str,
     service_url: str | None,
     eval_timeout: int,
+    direct: bool,
     args: tuple[str, ...],
 ) -> None:
     """Final-score a run from its on-disk eval results.
@@ -257,10 +263,10 @@ def score(
     manifest's FULL task list by default — tasks without an eval submit as None
     and score zero, so a partial run cannot inflate its score by omission; pass
     task ids after the name to override. Direct mode defaults to the run
-    config's frozen task list.
+    config's frozen task list; pass --direct to score specific direct task ids.
     """
     service_url, dataset, results_dir, task_ids, mf = _resolve_results_target(
-        args, service_url, dataset, results_dir
+        args, service_url, dataset, results_dir, direct=direct
     )
     if not task_ids and mf is not None:
         task_ids = [t.id for t in mf.tasks]

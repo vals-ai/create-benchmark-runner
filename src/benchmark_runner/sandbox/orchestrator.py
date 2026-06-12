@@ -170,8 +170,14 @@ async def run_benchmark(
             "payload_type": "text",
         }
         artifacts.save_run_config(config)
-    elif dataset is None:
-        dataset = config.get("dataset_name")
+    else:
+        if dataset is None:
+            dataset = config.get("dataset_name")
+        existing_task_ids = list(config["tasks"])
+        merged_task_ids = existing_task_ids + [tid for tid in task_ids if tid not in existing_task_ids]
+        if merged_task_ids != existing_task_ids:
+            config = {**config, "tasks": merged_task_ids}
+            artifacts.save_run_config(config)
     config_task_ids: list[str] = config["tasks"]
 
     backend = SandboxGenerationBackend()
@@ -356,6 +362,7 @@ async def evaluate_run(
     for r in results:
         if isinstance(r, BaseException):
             logger.error("unexpected eval exception (should have been caught): %s", r)
+            raise r
 
 
 async def score_run(

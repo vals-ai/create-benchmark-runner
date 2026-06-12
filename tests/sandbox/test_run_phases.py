@@ -1,5 +1,6 @@
 """Behavioral tests for the split run phases: `run --skip-eval`, evaluate_run, score_run."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -74,6 +75,47 @@ async def test_run_benchmark_skip_eval_generates_only(
 
 
 @pytest.mark.asyncio
+async def test_direct_skip_eval_slices_merge_into_scored_task_set(
+    tmp_path: Path, contract_yaml: Path
+) -> None:
+    client = FakeClient()
+    run_id = "r1"
+
+    await run_benchmark(
+        run_id=run_id,
+        model="openai/gpt-5",
+        task_ids=["t1"],
+        dataset="ds",
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=client,
+        provider=FakeProvider(),
+        skip_eval=True,
+    )
+    await run_benchmark(
+        run_id=run_id,
+        model="openai/gpt-5",
+        task_ids=["t2"],
+        dataset="ds",
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=client,
+        provider=FakeProvider(),
+        skip_eval=True,
+    )
+
+    artifacts = RunArtifacts(results_dir=tmp_path, run_id=run_id)
+    config = artifacts.load_run_config()
+    assert config is not None
+    assert config["tasks"] == ["t1", "t2"]
+
+    await evaluate_run(run_id=run_id, results_dir=str(tmp_path), client=client)
+    await score_run(run_id=run_id, results_dir=str(tmp_path), client=client)
+    assert client.last_final_score_args is not None
+    assert set(client.last_final_score_args) == {"t1", "t2"}
+
+
+@pytest.mark.asyncio
 async def test_evaluate_run_discovers_slices_and_resumes(tmp_path: Path) -> None:
     """With no explicit task ids, every on-disk generation is evaluated — slices
     written by separate `run --skip-eval` invocations included. Failed generations
@@ -93,6 +135,17 @@ async def test_evaluate_run_discovers_slices_and_resumes(tmp_path: Path) -> None
 
     await evaluate_run(run_id="r1", results_dir=str(tmp_path), client=client)
     assert client.evaluate_call_count == 1  # resume: the clean eval is not redone
+
+
+@pytest.mark.asyncio
+async def test_evaluate_run_raises_artifact_read_failures(tmp_path: Path) -> None:
+    artifacts = RunArtifacts(results_dir=tmp_path, run_id="r1")
+    generation_path = artifacts.generation_path("t1")
+    generation_path.parent.mkdir(parents=True)
+    generation_path.write_text("{not json")
+
+    with pytest.raises(json.JSONDecodeError):
+        await evaluate_run(run_id="r1", results_dir=str(tmp_path), client=FakeClient())
 
 
 @pytest.mark.asyncio
@@ -157,6 +210,41 @@ def test_cli_eval_manifest_mode_resolves_target(
     assert call["dataset"] == "mybench-dataset"
     assert call["results_dir"] == str(Path("results") / "mybench")
     assert client_urls == ["http://svc"]
+
+
+def test_cli_eval_unknown_manifest_name_fails(
+    tmp_path: Path,
+) -> None:
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(cli, ["eval", "--run-id", "r1", "missing-benchmark"])
+
+    assert result.exit_code != 0
+    assert "benchmark 'missing-benchmark' is not installed" in result.output
+
+
+def test_cli_eval_direct_mode_requires_explicit_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+
+    async def fake_evaluate_run(**kwargs: object) -> None:
+        calls.append(dict(kwargs))
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.evaluate_run", fake_evaluate_run)
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.cli.BenchmarkServiceClient",
+        lambda url, **kw: MagicMock(),
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        result = runner.invoke(cli, ["eval", "--run-id", "r1", "--direct", "task-1"])
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call["task_ids"] == ["task-1"]
+    assert call["results_dir"] == "results"
 
 
 def test_cli_score_manifest_mode_defaults_to_full_task_list(
