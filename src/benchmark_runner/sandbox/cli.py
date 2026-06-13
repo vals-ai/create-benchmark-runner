@@ -14,7 +14,12 @@ from benchmark_service.sandbox.types import ImageSource
 from benchmark_runner.client import auth_headers
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.sandbox.manifest import Manifest, generate_manifest
-from benchmark_runner.sandbox.orchestrator import SandboxTaskSpec, run_benchmark
+from benchmark_runner.sandbox.orchestrator import (
+    SandboxTaskSpec,
+    evaluate_run,
+    run_benchmark,
+    score_run,
+)
 from benchmark_runner.sandbox.store import (
     install_manifest,
     list_installed,
@@ -68,6 +73,7 @@ def _task_specs_from_manifest(mf: Manifest) -> dict[str, SandboxTaskSpec]:
 @click.option("--parallelism", default=10, type=int, help="Number of concurrent tasks")
 @click.option("--image", default=None, help="Override: boot every sandbox from this registry image (e.g. to validate a candidate agent build) instead of the source retrieve_task returns. Eval still uses the service.")
 @click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for service calls incl. the eval judge. Default 1800; the rubric judge can take minutes, and the 60s client default times out (httpx.ReadTimeout) on slow tasks.")
+@click.option("--skip-eval", is_flag=True, help="Generation only: skip per-task evaluation and the final score. Evaluate later with `benchmark eval`, then `benchmark score` — lets generation be sliced across invocations into one shared results/<run_id>/.")
 @click.argument("args", nargs=-1)
 def run(
     model: str,
@@ -79,6 +85,7 @@ def run(
     parallelism: int,
     image: str | None,
     eval_timeout: int,
+    skip_eval: bool,
     args: tuple[str, ...],
 ) -> None:
     """Run the sandbox orchestrator.
@@ -150,7 +157,135 @@ def run(
             parallelism=parallelism,
             source_override=source_override,
             task_specs=task_specs,
+            skip_eval=skip_eval,
         )
+    )
+
+
+def _resolve_results_target(
+    args: tuple[str, ...],
+    service_url: str | None,
+    dataset: str | None,
+    results_dir: str,
+    *,
+    direct: bool = False,
+) -> tuple[str, str | None, str, list[str], Manifest | None]:
+    """Resolve eval/score target from either an installed benchmark or direct task ids."""
+    if direct or not args:
+        return (
+            service_url or os.environ.get("SERVICE_URL", ""),
+            dataset,
+            results_dir,
+            list(args),
+            None,
+        )
+    mf = load_installed(args[0])
+    if mf is None:
+        installed = ", ".join(m.benchmark for m in list_installed()) or "none"
+        raise click.ClickException(
+            f"benchmark '{args[0]}' is not installed (installed: {installed}); "
+            "install it with `benchmark add <manifest.yaml>` or pass --direct for task ids"
+        )
+    return (
+        service_url or mf.service.url,
+        dataset or mf.dataset.name,
+        str(Path(results_dir) / mf.benchmark),
+        list(args[1:]),
+        mf,
+    )
+
+
+@cli.command(name="eval")
+@click.option("--run-id", required=True, help="Run identifier to evaluate")
+@click.option("--dataset", default=None, help="Dataset name (defaults to the manifest's, then the run config's)")
+@click.option("--results-dir", default="results", help="Results root directory")
+@click.option("--service-url", default=None, help="Benchmark service URL (direct mode: falls back to $SERVICE_URL; manifest mode: overrides the manifest's service.url)")
+@click.option("--parallelism", default=10, type=int, help="Number of concurrent evaluation calls")
+@click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for the eval judge; see `run --eval-timeout`.")
+@click.option("--direct", is_flag=True, help="Treat ARGS as direct task ids instead of an installed benchmark name")
+@click.argument("args", nargs=-1)
+def eval_cmd(
+    run_id: str,
+    dataset: str | None,
+    results_dir: str,
+    service_url: str | None,
+    parallelism: int,
+    eval_timeout: int,
+    direct: bool,
+    args: tuple[str, ...],
+) -> None:
+    """Evaluate a run's existing generations, without re-running generation.
+
+    Manifest mode: the first ARG is an installed benchmark name; remaining ARGS
+    are task ids. Direct mode: pass --direct to treat ARGS as task ids. With no
+    task ids, every task with a generation.json under results/<run_id>/ is
+    evaluated. Tasks that already evaluated cleanly are skipped (resume).
+    """
+    service_url, dataset, results_dir, task_ids, _ = _resolve_results_target(
+        args, service_url, dataset, results_dir, direct=direct
+    )
+    client = BenchmarkServiceClient(service_url, headers=auth_headers(), timeout=eval_timeout)
+    try:
+        asyncio.run(
+            evaluate_run(
+                run_id=run_id,
+                results_dir=results_dir,
+                client=client,
+                dataset=dataset,
+                task_ids=task_ids or None,
+                parallelism=parallelism,
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+@cli.command()
+@click.option("--run-id", required=True, help="Run identifier to score")
+@click.option("--dataset", default=None, help="Dataset name (defaults to the manifest's, then the run config's)")
+@click.option("--results-dir", default="results", help="Results root directory")
+@click.option("--service-url", default=None, help="Benchmark service URL (direct mode: falls back to $SERVICE_URL; manifest mode: overrides the manifest's service.url)")
+@click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for the final-score call.")
+@click.option("--direct", is_flag=True, help="Treat ARGS as direct task ids instead of an installed benchmark name")
+@click.argument("args", nargs=-1)
+def score(
+    run_id: str,
+    dataset: str | None,
+    results_dir: str,
+    service_url: str | None,
+    eval_timeout: int,
+    direct: bool,
+    args: tuple[str, ...],
+) -> None:
+    """Final-score a run from its on-disk eval results.
+
+    Manifest mode (first ARG = installed benchmark name) scores over the
+    manifest's FULL task list by default — tasks without an eval submit as None
+    and score zero, so a partial run cannot inflate its score by omission; pass
+    task ids after the name to override. Direct mode defaults to the run
+    config's frozen task list; pass --direct to score specific direct task ids.
+    """
+    service_url, dataset, results_dir, task_ids, mf = _resolve_results_target(
+        args, service_url, dataset, results_dir, direct=direct
+    )
+    if not task_ids and mf is not None:
+        task_ids = [t.id for t in mf.tasks]
+    client = BenchmarkServiceClient(service_url, headers=auth_headers(), timeout=eval_timeout)
+    try:
+        result = asyncio.run(
+            score_run(
+                run_id=run_id,
+                results_dir=results_dir,
+                client=client,
+                dataset=dataset,
+                task_ids=task_ids or None,
+            )
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"final_score={result.final_score} "
+        f"tasks_evaluated={len(result.tasks_evaluated)} complete={result.complete}"
     )
 
 
