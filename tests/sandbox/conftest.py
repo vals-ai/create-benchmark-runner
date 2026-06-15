@@ -9,6 +9,7 @@ from benchmark_service.sandbox import ImageSource, Resources, SandboxCreateReque
 from benchmark_service.schemas import FinalScoreResponse, RetrieveTaskResponse, SetupTaskResponse
 from benchmark_runner.sandbox.manifest import (
     AgentSpec,
+    BundleSpec,
     DatasetSpec,
     EvalSpec,
     Manifest,
@@ -23,6 +24,7 @@ def make_manifest(
     *,
     image: str = "ghcr.io/vals-ai/agent@sha256:" + "a" * 64,
     service_version: str | None = "0.6.1",
+    bundle: BundleSpec | None = None,
 ) -> Manifest:
     """Minimal valid manifest for store/CLI tests: two tasks, shared image, one secret."""
     return Manifest(
@@ -30,6 +32,7 @@ def make_manifest(
         service=ServiceSpec(url="http://svc", framework_version="1.0.0", service_version=service_version),
         dataset=DatasetSpec(name=f"{name}-dataset"),
         agent=AgentSpec(
+            bundle=bundle,
             install_cmd=None,
             run_cmd="agent run --model {model} --problem {problem_statement_path}",
             final_output="/app/results",

@@ -4,6 +4,7 @@ import json
 import shlex
 from pathlib import Path
 
+from benchmark_runner.sandbox.bundle import BUNDLE_DIR, AgentBundle
 from benchmark_runner.sandbox.contract import AgentContract
 from benchmark_runner.sandbox.protocols import SandboxLike
 from benchmark_runner.schemas import GenerationResult, GenerationStatus
@@ -50,6 +51,7 @@ class SandboxGenerationBackend:
         cwd: str,
         agent_timeout: float | None,
         log_dir: Path,
+        bundle: AgentBundle | None = None,
     ) -> GenerationResult:
         try:
             # Without final_output there is no result file to read; fail before any exec.
@@ -64,12 +66,38 @@ class SandboxGenerationBackend:
             # Step 0: services may return a cwd the image does not pre-create.
             await sandbox.exec(f"mkdir -p {shlex.quote(cwd)}")
 
-            # Step 1: install the agent per the contract; fail fast on a nonzero exit.
+            install_cwd = bundle.install_path if bundle else cwd
+
+            # A pinned bundle must be present before the install command runs.
+            if bundle is not None:
+                bundle_zip = f"/tmp/{bundle.root}.zip"
+                bundle_zip_arg = shlex.quote(bundle_zip)
+                install_path_arg = shlex.quote(bundle.install_path)
+                await sandbox.upload_file(bundle_zip, bundle.zip_bytes)
+                extract_result = await sandbox.exec(
+                    "command -v unzip >/dev/null"
+                    " || { echo 'task image is missing unzip, required to extract the agent bundle'; exit 96; }; "
+                    f"mkdir -p {BUNDLE_DIR}"
+                    f" && rm -rf {install_path_arg}"
+                    f" && unzip -oq {bundle_zip_arg} -d {BUNDLE_DIR}"
+                    f" && rm -f {bundle_zip_arg}"
+                )
+                if extract_result.exit_code != 0:
+                    return _error_result(
+                        task_id=task_id,
+                        model=model,
+                        error=(
+                            f"bundle extract failed (exit {extract_result.exit_code}): "
+                            f"{extract_result.output[:1024]}"
+                        ),
+                    )
+
             # Timeouts are shell `timeout` prefixes inside the command string: passing
             # timeout= to exec would prefix OUTSIDE the `cd && ...` chain and break it.
             if contract.install_cmd:
                 install_result = await sandbox.exec(
-                    f"cd {shlex.quote(cwd)} && timeout -k 10 {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
+                    f"cd {shlex.quote(install_cwd)}"
+                    f" && timeout -k 10 {INSTALL_TIMEOUT_SEC} {contract.install_cmd}"
                 )
                 if install_result.exit_code != 0:
                     return _error_result(
