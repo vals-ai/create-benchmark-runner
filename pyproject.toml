@@ -13,12 +13,10 @@ dependencies = [
     "tqdm>=4.67.1",
     "create-benchmark-service @ git+https://github.com/vals-ai/create-benchmark-service.git@07fcfad645c8365d9f25872461dd166033cf70e2",
     "model-library>=0.1.25",
-    "docker>=7.1.0",
 ]
 
 [project.scripts]
 create-benchmark-runner = "benchmark_runner.scaffolder.main:main"
-benchmark = "benchmark_runner.sandbox.cli:cli"
 
 [build-system]
 requires = ["hatchling"]
