@@ -97,6 +97,8 @@ class SWEBenchRunner(BenchmarkRunner):
 
 The sandbox backend is pluggable. The `benchmark run` CLI defaults to local Docker (`--sandbox-provider docker`, or `SANDBOX_PROVIDER=docker`) and can use Daytona with `--sandbox-provider daytona` / `SANDBOX_PROVIDER=daytona`, built by the cbs client from `DAYTONA_API_KEY`/`DAYTONA_API_URL`/`DAYTONA_TARGET`; any other backend plugs in as a provider object.
 
+Use repeated `--sandbox-env NAME` flags to copy runtime-only environment variables, such as model-provider keys, from the orchestrator process into each sandbox without adding them to the manifest's `required_env`.
+
 ### Implementing a sandbox provider
 
 A provider implements the `benchmark_service.sandbox` interface: a `SandboxProvider` and the `Sandbox` it returns. This is the whole abstraction (copied from create-benchmark-service `sandbox/types.py`):
@@ -182,7 +184,7 @@ The orchestrator loop itself uses a narrow core of that interface. Implement the
 
 | Method | Called | Contract the orchestrator relies on |
 |---|---|---|
-| `provider.create_sandbox(request)` | once per task | `request.source` is always an `ImageSource` (snapshots are rejected before the provider sees them). `request.env_vars` must reach the agent process env — it carries the contract-declared secrets. `request.name` is `{run_id}-{task_id}`. Raise on failure: the task is recorded as a generation ERROR. |
+| `provider.create_sandbox(request)` | once per task | `request.source` is always an `ImageSource` (snapshots are rejected before the provider sees them). `request.env_vars` must reach the agent process env — it carries contract-declared secrets plus runtime env explicitly requested with `--sandbox-env`. `request.name` is `{run_id}-{task_id}`. Raise on failure: the task is recorded as a generation ERROR. |
 | `sandbox.exec(command)` | cwd mkdir, install, agent run | `command` is a shell string (`cd X && …`, `timeout N …`) — run it through a shell. Return `ExecResult(exit_code, output)` with stderr merged into `output` (on a nonzero exit, `output` becomes the recorded error text). Exit code `124` must propagate untouched — it classifies the task as MAX_TIME rather than ERROR. The orchestrator never passes `cwd=`/`timeout=` kwargs; both are baked into the command string. |
 | `sandbox.upload_file(path, content)` | task setup | Writes the problem statement — and the agent bundle zip, when one is pinned — into the sandbox; `path` is absolute. Manifest-native runs upload directly; callback runs do the same write service-side through this interface. |
 | `sandbox.download_file(path)` | after the agent run | MUST raise when the file is missing — an absent `generation.json` is how a failed run is classified. Returning empty bytes would silently corrupt results. |

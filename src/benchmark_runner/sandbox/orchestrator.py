@@ -59,15 +59,16 @@ def _require_image_source(source: SandboxSource) -> ImageSource:
     )
 
 
-def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
-    """Resolve the contract's declared secret env-var names from the orchestrator's
-    own environment. Keying on the contract keeps unrelated orchestrator env
-    (SERVICE_URL, Daytona creds) out of the sandbox; a declared name missing from
-    the env is an error, since the agent would only fail later without it.
+def _resolve_secret_env(
+    contract: AgentContract,
+    *,
+    sandbox_env: list[str] | None = None,
+) -> dict[str, str]:
+    """Resolve explicitly forwarded sandbox env from the orchestrator's own env.
 
-    The BYO-endpoint vars (_BYO_ENDPOINT_ENV_VARS) are forwarded on top whenever
-    set, independent of the contract, so a lab can point generation at its own
-    model endpoint without editing any agent's contract.
+    Contract-declared secrets, `--sandbox-env` names, and BYO-endpoint vars are
+    the only values copied into the sandbox; unrelated orchestrator env
+    (SERVICE_URL, Daytona creds) stays outside.
     """
     env: dict[str, str] = {}
     missing: list[str] = []
@@ -81,6 +82,18 @@ def _resolve_secret_env(contract: AgentContract) -> dict[str, str]:
         raise ValueError(
             "contract declares secret(s) not set in the orchestrator env: "
             + ", ".join(sorted(missing))
+        )
+    runtime_missing: list[str] = []
+    for var_name in dict.fromkeys(sandbox_env or []):
+        value = os.environ.get(var_name)
+        if value:
+            env[var_name] = value
+        else:
+            runtime_missing.append(var_name)
+    if runtime_missing:
+        raise ValueError(
+            "sandbox env var(s) not set in the orchestrator env: "
+            + ", ".join(sorted(runtime_missing))
         )
     for var_name in _BYO_ENDPOINT_ENV_VARS:
         value = os.environ.get(var_name)
@@ -137,6 +150,7 @@ async def run_benchmark(
     skip_eval: bool = False,
     bundle: AgentBundle | None = None,
     cli_status: bool = False,
+    sandbox_env: list[str] | None = None,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
@@ -182,7 +196,7 @@ async def run_benchmark(
     if contract.final_output is None:
         raise ValueError("contract.final_output is not set; no generation file to read")
     contract = contract.model_copy(update={"run_cmd": format_run_cmd(contract.run_cmd, {"model": model})})
-    secret_env = _resolve_secret_env(contract)  # constant across tasks
+    secret_env = _resolve_secret_env(contract, sandbox_env=sandbox_env)  # constant across tasks
 
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     config = artifacts.load_run_config()

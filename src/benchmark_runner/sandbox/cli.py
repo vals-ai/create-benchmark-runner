@@ -1,10 +1,13 @@
 """Click CLI for the sandbox orchestrator."""
 
 import asyncio
+import inspect
 import os
 import shutil
 import tempfile
+from collections.abc import Awaitable
 from pathlib import Path
+from typing import TypeVar
 
 import click
 import yaml
@@ -39,10 +42,23 @@ from benchmark_runner.sandbox.store import (
     pin_diff,
 )
 
+T = TypeVar("T")
+
 
 @click.group()
 def cli() -> None:
     load_dotenv(Path(".env"), override=True)
+
+
+async def _run_and_close(client: object, awaitable: Awaitable[T]) -> T:
+    try:
+        return await awaitable
+    finally:
+        close = getattr(client, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 def _contract_from_manifest(mf: Manifest) -> AgentContract:
@@ -137,6 +153,11 @@ def _daytona_headers(headers: dict[str, str]) -> dict[str, str]:
 @click.option("--skip-eval", is_flag=True, help="Generation only: skip per-task evaluation and the final score. Evaluate later with `benchmark eval`, then `benchmark score` — lets generation be sliced across invocations into one shared results/<run_id>/.")
 @click.option("--bundle", "bundle_arg", default=None, type=click.Path(exists=True, path_type=Path), help="Agent bundle (zip, or a directory zipped on the fly) installed into each sandbox at /bundle/<name>. Overrides the manifest's pinned bundle — e.g. to run a custom agent against pinned tasks.")
 @click.option(
+    "--sandbox-env",
+    multiple=True,
+    help="Env var name to copy from this process into each sandbox at generation time. Repeat for multiple values.",
+)
+@click.option(
     "--sandbox-provider",
     type=click.Choice(["docker", "daytona"]),
     default="docker",
@@ -157,6 +178,7 @@ def run(
     eval_timeout: int,
     skip_eval: bool,
     bundle_arg: Path | None,
+    sandbox_env: tuple[str, ...],
     sandbox_provider: str,
     args: tuple[str, ...],
 ) -> None:
@@ -226,22 +248,26 @@ def run(
     client = BenchmarkServiceClient(service_url, headers=headers, timeout=eval_timeout)
 
     asyncio.run(
-        run_benchmark(
-            run_id=run_id,
-            model=model,
-            task_ids=task_ids,
-            dataset=dataset,
-            results_dir=results_dir,
-            contract_path=contract_path,
-            contract=agent_contract,
-            client=client,
-            provider=provider,
-            parallelism=parallelism,
-            source_override=source_override,
-            task_specs=task_specs,
-            skip_eval=skip_eval,
-            bundle=bundle,
-            cli_status=True,
+        _run_and_close(
+            client,
+            run_benchmark(
+                run_id=run_id,
+                model=model,
+                task_ids=task_ids,
+                dataset=dataset,
+                results_dir=results_dir,
+                contract_path=contract_path,
+                contract=agent_contract,
+                client=client,
+                provider=provider,
+                parallelism=parallelism,
+                source_override=source_override,
+                task_specs=task_specs,
+                skip_eval=skip_eval,
+                bundle=bundle,
+                cli_status=True,
+                sandbox_env=list(sandbox_env),
+            ),
         )
     )
 

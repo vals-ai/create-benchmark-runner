@@ -1,8 +1,10 @@
 """Sandbox execution backend for running benchmark agents in-sandbox."""
 
+import io
 import json
 import shlex
-from pathlib import Path
+import zipfile
+from pathlib import Path, PurePosixPath
 
 from benchmark_runner.sandbox.bundle import BUNDLE_DIR, AgentBundle
 from benchmark_runner.sandbox.contract import AgentContract
@@ -39,6 +41,27 @@ def _max_time_result(*, task_id: str, model: str, error: str) -> GenerationResul
     )
 
 
+def _bundle_uploads(bundle: AgentBundle) -> list[tuple[str, bytes]]:
+    uploads: list[tuple[str, bytes]] = []
+    with zipfile.ZipFile(io.BytesIO(bundle.zip_bytes)) as zf:
+        for entry in zf.infolist():
+            if entry.is_dir():
+                continue
+            path = PurePosixPath(entry.filename)
+            if (
+                len(path.parts) < 2
+                or path.is_absolute()
+                or "\\" in entry.filename
+                or ".." in path.parts
+                or path.parts[0] != bundle.root
+            ):
+                raise ValueError(f"agent bundle has an unsafe entry path: {entry.filename!r}")
+            uploads.append((f"{BUNDLE_DIR}/{path.as_posix()}", zf.read(entry)))
+    if not uploads:
+        raise ValueError("agent bundle contains no files")
+    return uploads
+
+
 class SandboxGenerationBackend:
     async def generate(
         self,
@@ -70,27 +93,24 @@ class SandboxGenerationBackend:
 
             # A pinned bundle must be present before the install command runs.
             if bundle is not None:
-                bundle_zip = f"/tmp/{bundle.root}.zip"
-                bundle_zip_arg = shlex.quote(bundle_zip)
                 install_path_arg = shlex.quote(bundle.install_path)
-                await sandbox.upload_file(bundle_zip, bundle.zip_bytes)
-                extract_result = await sandbox.exec(
-                    "command -v unzip >/dev/null"
-                    " || { echo 'task image is missing unzip, required to extract the agent bundle'; exit 96; }; "
-                    f"mkdir -p {BUNDLE_DIR}"
-                    f" && rm -rf {install_path_arg}"
-                    f" && unzip -oq {bundle_zip_arg} -d {BUNDLE_DIR}"
-                    f" && rm -f {bundle_zip_arg}"
+                bundle_uploads = _bundle_uploads(bundle)
+                parent_dirs = sorted({str(PurePosixPath(path).parent) for path, _ in bundle_uploads})
+                prepare_result = await sandbox.exec(
+                    f"rm -rf {install_path_arg}"
+                    f" && mkdir -p {' '.join(shlex.quote(path) for path in parent_dirs)}"
                 )
-                if extract_result.exit_code != 0:
+                if prepare_result.exit_code != 0:
                     return _error_result(
                         task_id=task_id,
                         model=model,
                         error=(
-                            f"bundle extract failed (exit {extract_result.exit_code}): "
-                            f"{extract_result.output[:1024]}"
+                            f"bundle prepare failed (exit {prepare_result.exit_code}): "
+                            f"{prepare_result.output[:1024]}"
                         ),
                     )
+                for remote_path, content in bundle_uploads:
+                    await sandbox.upload_file(remote_path, content)
 
             # Timeouts are shell `timeout` prefixes inside the command string: passing
             # timeout= to exec would prefix OUTSIDE the `cd && ...` chain and break it.
