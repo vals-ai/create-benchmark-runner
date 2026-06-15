@@ -22,6 +22,7 @@ from benchmark_runner.sandbox.bundle import (
     zip_root,
 )
 from benchmark_runner.sandbox.contract import AgentContract
+from benchmark_runner.sandbox.local_docker import LocalDockerSandboxProvider
 from benchmark_runner.sandbox.manifest import BundleSpec, Manifest, generate_manifest
 from benchmark_runner.sandbox.orchestrator import (
     SandboxTaskSpec,
@@ -109,6 +110,20 @@ def _load_installed_benchmark(name: str, *, direct_hint: bool = False) -> Manife
     )
 
 
+def _daytona_headers(headers: dict[str, str]) -> dict[str, str]:
+    daytona_api_key = os.environ.get("DAYTONA_API_KEY")
+    daytona_api_url = os.environ.get("DAYTONA_API_URL")
+    daytona_target = os.environ.get("DAYTONA_TARGET")
+    if daytona_api_key:
+        headers["x-api-key"] = daytona_api_key
+    if daytona_api_url:
+        headers["x-api-url"] = daytona_api_url
+    if daytona_target:
+        headers["x-target"] = daytona_target
+    headers["x-sandbox-provider"] = "daytona"
+    return headers
+
+
 @cli.command()
 @click.option("--model", required=True, help="Model identifier")
 @click.option("--run-id", required=True, help="Unique run identifier")
@@ -121,6 +136,14 @@ def _load_installed_benchmark(name: str, *, direct_hint: bool = False) -> Manife
 @click.option("--eval-timeout", default=1800, type=int, help="HTTP timeout (s) for service calls incl. the eval judge. Default 1800; the rubric judge can take minutes, and the 60s client default times out (httpx.ReadTimeout) on slow tasks.")
 @click.option("--skip-eval", is_flag=True, help="Generation only: skip per-task evaluation and the final score. Evaluate later with `benchmark eval`, then `benchmark score` — lets generation be sliced across invocations into one shared results/<run_id>/.")
 @click.option("--bundle", "bundle_arg", default=None, type=click.Path(exists=True, path_type=Path), help="Agent bundle (zip, or a directory zipped on the fly) installed into each sandbox at /bundle/<name>. Overrides the manifest's pinned bundle — e.g. to run a custom agent against pinned tasks.")
+@click.option(
+    "--sandbox-provider",
+    type=click.Choice(["docker", "daytona"]),
+    default="docker",
+    envvar="SANDBOX_PROVIDER",
+    show_default=True,
+    help="Sandbox backend for generation. Docker runs local containers; Daytona uses the service-backed provider.",
+)
 @click.argument("args", nargs=-1)
 def run(
     model: str,
@@ -134,6 +157,7 @@ def run(
     eval_timeout: int,
     skip_eval: bool,
     bundle_arg: Path | None,
+    sandbox_provider: str,
     args: tuple[str, ...],
 ) -> None:
     """Run the sandbox orchestrator.
@@ -187,17 +211,17 @@ def run(
         raise click.ClickException(str(exc)) from exc
 
     headers = auth_headers()
+    provider = None
 
-    daytona_api_key = os.environ.get("DAYTONA_API_KEY")
-    daytona_api_url = os.environ.get("DAYTONA_API_URL")
-    daytona_target = os.environ.get("DAYTONA_TARGET")
-    if daytona_api_key:
-        headers["x-api-key"] = daytona_api_key
-    if daytona_api_url:
-        headers["x-api-url"] = daytona_api_url
-    if daytona_target:
-        headers["x-target"] = daytona_target
-    headers["x-sandbox-provider"] = "daytona"
+    if sandbox_provider == "docker":
+        if task_specs is None:
+            raise click.ClickException(
+                "docker sandbox provider requires an installed manifest so the runner can upload "
+                "problem statements locally; pass a benchmark name or use --sandbox-provider daytona"
+            )
+        provider = LocalDockerSandboxProvider()
+    else:
+        headers = _daytona_headers(headers)
 
     client = BenchmarkServiceClient(service_url, headers=headers, timeout=eval_timeout)
 
@@ -211,6 +235,7 @@ def run(
             contract_path=contract_path,
             contract=agent_contract,
             client=client,
+            provider=provider,
             parallelism=parallelism,
             source_override=source_override,
             task_specs=task_specs,
