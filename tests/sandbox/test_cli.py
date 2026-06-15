@@ -208,6 +208,39 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["task_specs"]["task-2"].problem_path == "/app/task2_problem.txt"
 
 
+def test_run_sandbox_env_is_runtime_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run_benchmark_calls: list[dict]
+) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
+    manifest = make_manifest("mybench")
+    manifest = manifest.model_copy(
+        update={"agent": manifest.agent.model_copy(update={"required_env": []})}
+    )
+
+    runner = CliRunner()
+    with runner.isolated_filesystem(temp_dir=tmp_path):
+        install_manifest(manifest)
+        result = runner.invoke(
+            cli,
+            [
+                "run",
+                "--model",
+                "m",
+                "--run-id",
+                "r",
+                "--sandbox-env",
+                "GOOGLE_API_KEY",
+                "mybench",
+                "task-1",
+            ],
+        )
+
+    assert result.exit_code == 0, result.output
+    (call,) = run_benchmark_calls
+    assert call["contract"].secrets == {}
+    assert call["sandbox_env"] == ["GOOGLE_API_KEY"]
+
+
 def test_run_daytona_provider_uses_service_provider_headers(
     contract_file: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

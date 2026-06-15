@@ -63,6 +63,50 @@ def test_resolve_secret_env_forwards_byo_endpoint_vars(monkeypatch: pytest.Monke
     assert env == {"CUSTOM_ENDPOINT": "https://my-model.internal/v1", "CUSTOM_API_KEY": "sk-lab"}
 
 
+def test_resolve_secret_env_forwards_requested_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
+    monkeypatch.setenv("VALS_AUTH_KEY", "should-not-leak")
+    contract = AgentContract(name="x", run_cmd="a --problem {problem_statement_path}", secrets={})
+
+    env = _resolve_secret_env(contract, sandbox_env=["GOOGLE_API_KEY"])
+
+    assert env == {"GOOGLE_API_KEY": "g-key"}
+    assert "VALS_AUTH_KEY" not in env
+
+
+def test_resolve_secret_env_requires_requested_runtime_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    contract = AgentContract(name="x", run_cmd="a --problem {problem_statement_path}", secrets={})
+
+    with pytest.raises(ValueError, match="sandbox env var.*GOOGLE_API_KEY"):
+        _resolve_secret_env(contract, sandbox_env=["GOOGLE_API_KEY"])
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_forwards_requested_runtime_env(
+    tmp_path: Path,
+    contract_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "g-key")
+    provider = FakeProvider()
+
+    await run_benchmark(
+        run_id="run-env",
+        model="openai/gpt-5",
+        task_ids=["task-a"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=FakeClient(),
+        provider=provider,
+        sandbox_env=["GOOGLE_API_KEY"],
+    )
+
+    assert provider.last_request is not None
+    assert provider.last_request.env_vars == {"GOOGLE_API_KEY": "g-key"}
+
+
 @pytest.mark.asyncio
 async def test_run_benchmark_contract_param(tmp_path: Path, contract_yaml: Path) -> None:
     """An in-memory contract (manifest mode) runs without a contract.yaml on disk;
