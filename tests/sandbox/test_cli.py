@@ -36,7 +36,16 @@ def contract_file(tmp_path: Path) -> str:
 
 
 @pytest.fixture
-def run_benchmark_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+def docker_provider(monkeypatch: pytest.MonkeyPatch) -> object:
+    provider = object()
+    monkeypatch.setattr(
+        "benchmark_runner.sandbox.cli.LocalDockerSandboxProvider", lambda: provider, raising=False
+    )
+    return provider
+
+
+@pytest.fixture
+def run_benchmark_calls(monkeypatch: pytest.MonkeyPatch, docker_provider: object) -> list[dict]:
     """Patch run_benchmark (capturing its kwargs per call) and the service client."""
     calls: list[dict] = []
 
@@ -64,7 +73,19 @@ def test_run_maps_args_to_run_benchmark(contract_file: str, monkeypatch: pytest.
     runner = CliRunner()
     result = runner.invoke(
         cli,
-        ["run", "--model", "m", "--run-id", "r", "--contract", contract_file, "t1", "t2"],
+        [
+            "run",
+            "--sandbox-provider",
+            "daytona",
+            "--model",
+            "m",
+            "--run-id",
+            "r",
+            "--contract",
+            contract_file,
+            "t1",
+            "t2",
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -135,7 +156,7 @@ def _make_manifest_with_distinct_problem_paths(name: str = "mybench") -> Manifes
 
 
 def test_run_manifest_mode_uses_installed_manifest(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, docker_provider: object
 ) -> None:
     """Without --contract, the first positional is an installed benchmark name:
     empty task ids expand to all manifest tasks, the contract (incl. required_env) is
@@ -143,12 +164,14 @@ def test_run_manifest_mode_uses_installed_manifest(
     nest under <results-dir>/<benchmark>. problem_path is read per-task (not agent-level)."""
     calls: list[dict] = []
     client_urls: list[str] = []
+    client_kwargs: list[dict] = []
 
     async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
         calls.append(kwargs)
 
     def fake_client(url: str, **kwargs: object) -> MagicMock:
         client_urls.append(url)
+        client_kwargs.append(kwargs)
         return MagicMock()
 
     monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
@@ -162,6 +185,7 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert result.exit_code == 0, result.output
     (call,) = calls
     assert call["task_ids"] == ["task-1", "task-2"]  # empty task ids = all tasks
+    assert call["provider"] is docker_provider
     assert call["contract_path"] is None
     # manifest carries names only; reconstructed contract maps each name to itself
     assert call["contract"].secrets == {"GOOGLE_API_KEY": "GOOGLE_API_KEY"}
@@ -169,6 +193,7 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["dataset"] == "mybench-dataset"
     assert call["results_dir"] == str(Path("results") / "mybench")
     assert client_urls == ["http://svc"]  # manifest's service.url
+    assert "x-sandbox-provider" not in client_kwargs[0]["headers"]
     assert call["task_specs"]["task-1"].source == ImageSource(
         image="ghcr.io/vals-ai/agent@sha256:" + "a" * 64
     )
@@ -180,6 +205,70 @@ def test_run_manifest_mode_uses_installed_manifest(
     assert call["task_specs"]["task-1"].problem_path == "/app/problem.txt"
     assert call["task_specs"]["task-2"].question == "Q2"
     assert call["task_specs"]["task-2"].problem_path == "/app/task2_problem.txt"
+
+
+def test_run_daytona_provider_uses_service_provider_headers(
+    contract_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict] = []
+    client_kwargs: list[dict] = []
+
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
+        calls.append(kwargs)
+
+    def fake_client(url: str, **kwargs: object) -> MagicMock:
+        client_kwargs.append(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", fake_client)
+    monkeypatch.setenv("DAYTONA_API_KEY", "daytona-key")
+    monkeypatch.setenv("DAYTONA_API_URL", "https://daytona.example")
+    monkeypatch.setenv("DAYTONA_TARGET", "target-1")
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--sandbox-provider",
+            "daytona",
+            "--model",
+            "m",
+            "--run-id",
+            "r",
+            "--contract",
+            contract_file,
+            "t1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    (call,) = calls
+    assert call["provider"] is None
+    headers = client_kwargs[0]["headers"]
+    assert headers["x-sandbox-provider"] == "daytona"
+    assert headers["x-api-key"] == "daytona-key"
+    assert headers["x-api-url"] == "https://daytona.example"
+    assert headers["x-target"] == "target-1"
+
+
+def test_run_docker_provider_requires_manifest_mode(
+    contract_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
+        raise AssertionError("run_benchmark should not be called")
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: MagicMock())
+
+    result = CliRunner().invoke(
+        cli,
+        ["run", "--model", "m", "--run-id", "r", "--contract", contract_file, "t1"],
+    )
+
+    assert result.exit_code != 0
+    assert "docker sandbox provider requires an installed manifest" in result.output
+    assert "--sandbox-provider daytona" in result.output
 
 
 def test_run_manifest_mode_unknown_name_lists_installed(tmp_path: Path) -> None:
@@ -343,6 +432,8 @@ def test_run_bundle_flag_zips_directory(
         cli,
         [
             "run",
+            "--sandbox-provider",
+            "daytona",
             "--model",
             "m",
             "--run-id",

@@ -95,7 +95,7 @@ class SWEBenchRunner(BenchmarkRunner):
 
 `benchmark run` drives the full benchmark loop with one sandbox per task: create a sandbox from a registry image → write the problem statement into it → install the agent bundle, when one is pinned (upload the zip, extract to `/bundle/<name>`, run `install_cmd` there) → run the agent per the contract (`run_cmd`) → download `<final_output>/<task_id>/generation.json` → delete the sandbox → eval/score through the service. Only pullable registry images are supported as sandbox sources (no Daytona snapshots).
 
-The sandbox backend is pluggable. The default is Daytona, built by the cbs client from `DAYTONA_API_KEY`/`DAYTONA_API_URL`/`DAYTONA_TARGET`; any other backend plugs in as a provider object.
+The sandbox backend is pluggable. The `benchmark run` CLI defaults to local Docker (`--sandbox-provider docker`, or `SANDBOX_PROVIDER=docker`) and can use Daytona with `--sandbox-provider daytona` / `SANDBOX_PROVIDER=daytona`, built by the cbs client from `DAYTONA_API_KEY`/`DAYTONA_API_URL`/`DAYTONA_TARGET`; any other backend plugs in as a provider object.
 
 ### Implementing a sandbox provider
 
