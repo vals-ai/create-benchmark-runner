@@ -151,6 +151,98 @@ async def test_run_benchmark_produces_artifacts_and_score(
 
 
 @pytest.mark.asyncio
+async def test_run_benchmark_status_reports_start_progress_and_done(
+    tmp_path: Path,
+    contract_yaml: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    await run_benchmark(
+        run_id="run-status",
+        model="openai/gpt-5",
+        task_ids=["task-a"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=FakeClient(),
+        provider=FakeProvider(),
+        cli_status=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "Starting run-status: 1 tasks" in captured.out
+    assert "Done: 1/1 evaluated." in captured.out
+    assert "Running" in captured.err
+    assert "task-a" in captured.err
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_status_reports_resume_subset_and_skip_eval(
+    tmp_path: Path,
+    contract_yaml: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    artifacts = RunArtifacts(results_dir=str(tmp_path), run_id="run-resume")
+    artifacts.save_run_config(
+        {
+            "run_id": "run-resume",
+            "model": "openai/gpt-5",
+            "tasks": ["task-a", "task-b"],
+            "dataset_name": None,
+            "task_source": "sandbox",
+        }
+    )
+
+    await run_benchmark(
+        run_id="run-resume",
+        model="openai/gpt-5",
+        task_ids=["task-a"],
+        dataset=None,
+        results_dir=str(tmp_path),
+        contract_path=contract_yaml,
+        client=FakeClient(),
+        provider=FakeProvider(),
+        skip_eval=True,
+        cli_status=True,
+    )
+
+    captured = capsys.readouterr()
+    assert "Resuming run-resume: 2 tasks" in captured.out
+    assert "Processing 1/2 tasks" in captured.out
+    assert "Eval skipped (--skip-eval)" in captured.out
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_status_reports_generation_failures_without_scoring(
+    tmp_path: Path,
+    contract_yaml: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class ExplodingProvider(FakeProvider):
+        async def create_sandbox(self, request: SandboxCreateRequest) -> object:  # type: ignore[override]
+            raise RuntimeError("infra exploded")
+
+    client = FakeClient()
+    with pytest.raises(SystemExit) as exc_info:
+        await run_benchmark(
+            run_id="run-fail",
+            model="openai/gpt-5",
+            task_ids=["task-fail"],
+            dataset=None,
+            results_dir=str(tmp_path),
+            contract_path=contract_yaml,
+            client=client,
+            provider=ExplodingProvider(),
+            cli_status=True,
+        )
+
+    assert exc_info.value.code == 1
+    captured = capsys.readouterr()
+    assert "Done: 0/1 evaluated." in captured.out
+    assert "Generation failed for: task-fail" in captured.err
+    assert client.last_final_score_args is None
+
+
+@pytest.mark.asyncio
 async def test_run_benchmark_resume_skips_sandboxes(
     tmp_path: Path,
     contract_yaml: Path,
