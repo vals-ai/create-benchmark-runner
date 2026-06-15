@@ -8,8 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import click
 from benchmark_service.sandbox import SandboxCreateRequest
 from benchmark_service.sandbox.types import ImageSource, Resources, SandboxSource
+from tqdm.asyncio import tqdm
 
 from benchmark_runner.artifacts import RunArtifacts
 from benchmark_runner.checkpoint import is_eval_redoable, is_generation_redoable
@@ -134,6 +136,7 @@ async def run_benchmark(
     task_specs: Mapping[str, SandboxTaskSpec] | None = None,
     skip_eval: bool = False,
     bundle: AgentBundle | None = None,
+    cli_status: bool = False,
 ) -> None:
     """Run the full benchmark loop against cloud sandboxes, one per task.
 
@@ -147,6 +150,9 @@ async def run_benchmark(
     generation can be sliced across invocations/machines into one shared
     results/<run_id>/ and evaluated later with `evaluate_run`, then scored once
     with `score_run`.
+
+    cli_status: emit the same progress/failure surface as the generic runner CLI;
+    failures raise SystemExit(1). Programmatic calls default to silent behavior.
 
     Exactly one of `contract_path` (load contract.yaml from disk) or `contract`
     (an in-memory AgentContract, e.g. built from an installed manifest via
@@ -180,6 +186,7 @@ async def run_benchmark(
 
     artifacts = RunArtifacts(results_dir=results_dir, run_id=run_id)
     config = artifacts.load_run_config()
+    was_resumed = config is not None
     if config is None:
         config = {
             "run_id": run_id,
@@ -200,9 +207,14 @@ async def run_benchmark(
             config = {**config, "tasks": merged_task_ids}
             artifacts.save_run_config(config)
     config_task_ids: list[str] = config["tasks"]
+    if cli_status:
+        click.echo(f"{'Resuming' if was_resumed else 'Starting'} {run_id}: {len(config_task_ids)} tasks")
+        if len(task_ids) != len(config_task_ids):
+            click.echo(f"Processing {len(task_ids)}/{len(config_task_ids)} tasks")
 
     backend = SandboxGenerationBackend()
     sem = asyncio.Semaphore(parallelism)
+    pbar = tqdm(total=len(task_ids), desc="Running") if cli_status else None
 
     async def _run_task(tid: str) -> None:
         # The semaphore gates generation only: eval is an HTTP call to the service
@@ -212,6 +224,9 @@ async def run_benchmark(
             await _process_generation(tid)
         if not skip_eval:
             await _evaluate_task(artifacts=artifacts, client=client, dataset=dataset, task_id=tid)
+        if pbar is not None:
+            pbar.set_postfix_str(tid)
+            pbar.update(1)
 
     async def _process_generation(tid: str) -> None:
         if not is_generation_redoable(artifacts, tid):
@@ -279,10 +294,47 @@ async def run_benchmark(
         artifacts.save_generation(tid, gen)
 
     results = await asyncio.gather(*(_run_task(tid) for tid in task_ids), return_exceptions=True)
+    if pbar is not None:
+        pbar.close()
     _raise_first_unexpected(results)
 
+    failed = [
+        tid
+        for tid in task_ids
+        if (generation := artifacts.load_generation(tid)) and generation.status == GenerationStatus.ERROR
+    ]
+
     if skip_eval:
+        if cli_status:
+            click.echo("Eval skipped (--skip-eval)")
+            if failed:
+                click.echo(f"Generation failed for: {', '.join(failed)}", err=True)
+                raise SystemExit(1)
         return
+
+    if cli_status:
+        evals = {tid: artifacts.load_eval(tid) for tid in task_ids}
+        evaluated = sum(1 for ev in evals.values() if ev is not None and ev.status == EvalStatus.EVALUATED)
+        eval_errors = [tid for tid, ev in evals.items() if ev is not None and ev.status == EvalStatus.ERROR]
+        missing_eval = [tid for tid, ev in evals.items() if ev is None]
+
+        parts = [f"{evaluated}/{len(task_ids)} evaluated"]
+        if eval_errors:
+            parts.append(f"{len(eval_errors)} eval errors")
+        if missing_eval:
+            parts.append(f"{len(missing_eval)} missing evals")
+        click.echo(f"Done: {', '.join(parts)}.")
+
+        if eval_errors:
+            click.echo(f"Evaluation failed for: {', '.join(eval_errors)}", err=True)
+        if missing_eval:
+            click.echo(f"Evaluation missing for: {', '.join(missing_eval)}", err=True)
+
+        if eval_errors or missing_eval:
+            raise SystemExit(1)
+        if failed:
+            click.echo(f"Generation failed for: {', '.join(failed)}", err=True)
+            raise SystemExit(1)
 
     await score_run(
         run_id=run_id,

@@ -241,6 +241,7 @@ def run(
             task_specs=task_specs,
             skip_eval=skip_eval,
             bundle=bundle,
+            cli_status=True,
         )
     )
 

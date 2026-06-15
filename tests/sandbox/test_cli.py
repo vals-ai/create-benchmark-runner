@@ -98,6 +98,7 @@ def test_run_maps_args_to_run_benchmark(contract_file: str, monkeypatch: pytest.
     assert calls[0]["contract_path"] == Path(contract_file)
     assert calls[0]["contract"] is None
     assert calls[0]["results_dir"] == "results"
+    assert calls[0]["cli_status"] is True
 
 
 def test_run_no_task_ids_exits_nonzero(contract_file: str, monkeypatch: pytest.MonkeyPatch) -> None:
