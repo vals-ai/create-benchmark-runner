@@ -1,10 +1,13 @@
 """Click CLI for the sandbox orchestrator."""
 
 import asyncio
+import inspect
 import os
 import shutil
 import tempfile
+from collections.abc import Awaitable
 from pathlib import Path
+from typing import TypeVar
 
 import click
 import yaml
@@ -39,10 +42,23 @@ from benchmark_runner.sandbox.store import (
     pin_diff,
 )
 
+T = TypeVar("T")
+
 
 @click.group()
 def cli() -> None:
     load_dotenv(Path(".env"), override=True)
+
+
+async def _run_and_close(client: object, awaitable: Awaitable[T]) -> T:
+    try:
+        return await awaitable
+    finally:
+        close = getattr(client, "close", None)
+        if close is not None:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
 
 
 def _contract_from_manifest(mf: Manifest) -> AgentContract:
@@ -232,23 +248,26 @@ def run(
     client = BenchmarkServiceClient(service_url, headers=headers, timeout=eval_timeout)
 
     asyncio.run(
-        run_benchmark(
-            run_id=run_id,
-            model=model,
-            task_ids=task_ids,
-            dataset=dataset,
-            results_dir=results_dir,
-            contract_path=contract_path,
-            contract=agent_contract,
-            client=client,
-            provider=provider,
-            parallelism=parallelism,
-            source_override=source_override,
-            task_specs=task_specs,
-            skip_eval=skip_eval,
-            bundle=bundle,
-            cli_status=True,
-            sandbox_env=list(sandbox_env),
+        _run_and_close(
+            client,
+            run_benchmark(
+                run_id=run_id,
+                model=model,
+                task_ids=task_ids,
+                dataset=dataset,
+                results_dir=results_dir,
+                contract_path=contract_path,
+                contract=agent_contract,
+                client=client,
+                provider=provider,
+                parallelism=parallelism,
+                source_override=source_override,
+                task_specs=task_specs,
+                skip_eval=skip_eval,
+                bundle=bundle,
+                cli_status=True,
+                sandbox_env=list(sandbox_env),
+            ),
         )
     )
 

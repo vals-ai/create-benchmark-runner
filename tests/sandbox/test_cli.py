@@ -1,7 +1,7 @@
 """Behavioral tests for the sandbox CLI entry point."""
 
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
@@ -284,6 +284,38 @@ def test_run_daytona_provider_uses_service_provider_headers(
     assert headers["x-api-key"] == "daytona-key"
     assert headers["x-api-url"] == "https://daytona.example"
     assert headers["x-target"] == "target-1"
+
+
+def test_run_closes_client_when_run_exits_nonzero(
+    contract_file: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_client = MagicMock()
+    fake_client.close = AsyncMock()
+
+    async def fake_run_benchmark(**kwargs) -> None:  # type: ignore[return]
+        raise SystemExit(1)
+
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.run_benchmark", fake_run_benchmark)
+    monkeypatch.setattr("benchmark_runner.sandbox.cli.BenchmarkServiceClient", lambda *a, **kw: fake_client)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "run",
+            "--sandbox-provider",
+            "daytona",
+            "--model",
+            "m",
+            "--run-id",
+            "r",
+            "--contract",
+            contract_file,
+            "t1",
+        ],
+    )
+
+    assert result.exit_code == 1
+    fake_client.close.assert_awaited_once()
 
 
 def test_run_docker_provider_requires_manifest_mode(

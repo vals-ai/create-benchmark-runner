@@ -1,7 +1,9 @@
 """Tests for SandboxGenerationBackend (TDD)."""
 
+import io
 import json
 import shlex
+import zipfile
 from pathlib import Path
 
 from benchmark_runner.sandbox.backend import SandboxGenerationBackend, _format_exc
@@ -82,6 +84,14 @@ def _make_contract(*, with_install: bool = True) -> AgentContract:
         install_cmd="bash setup.sh" if with_install else None,
         final_output="/app/results",
     )
+
+
+def _make_bundle() -> AgentBundle:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("my_agent/setup.sh", "echo setup")
+        zf.writestr("my_agent/agent.py", "print('hi')")
+    return AgentBundle(root="my_agent", zip_bytes=buf.getvalue())
 
 
 async def test_success_path(tmp_path: Path) -> None:
@@ -344,7 +354,7 @@ async def test_runtime_placeholders_are_shell_quoted(tmp_path: Path) -> None:
 
 
 async def test_bundle_installed_at_bundle_root(tmp_path: Path) -> None:
-    """Bundles extract under /bundle and install from their top-level directory."""
+    """Bundles upload under /bundle and install from their top-level directory."""
     sandbox = FakeSandbox(download_bytes=_make_generation_json("task-1"))
 
     result = await SandboxGenerationBackend().generate(
@@ -356,14 +366,13 @@ async def test_bundle_installed_at_bundle_root(tmp_path: Path) -> None:
         cwd="/app",
         agent_timeout=None,
         log_dir=tmp_path,
-        bundle=AgentBundle(root="my_agent", zip_bytes=b"zipbytes"),
+        bundle=_make_bundle(),
     )
 
     assert result.status == GenerationStatus.SUCCESS
-    assert sandbox.uploads == [("/tmp/my_agent.zip", b"zipbytes")]
-    extract_cmd = next(c for c in sandbox.commands if "unzip" in c)
-    assert "rm -rf /bundle/my_agent" in extract_cmd
-    assert extract_cmd.index("rm -rf /bundle/my_agent") < extract_cmd.index("unzip -oq")
-    assert "-d /bundle" in extract_cmd
+    assert ("/bundle/my_agent/setup.sh", b"echo setup") in sandbox.uploads
+    assert ("/bundle/my_agent/agent.py", b"print('hi')") in sandbox.uploads
+    assert not any(path == "/tmp/my_agent.zip" for path, _ in sandbox.uploads)
+    assert not any("unzip" in command for command in sandbox.commands)
     install_cmd = next(c for c in sandbox.commands if "setup.sh" in c)
     assert install_cmd.startswith("cd /bundle/my_agent && ")
