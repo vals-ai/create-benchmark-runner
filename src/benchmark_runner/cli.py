@@ -4,6 +4,7 @@ import asyncio
 import importlib.metadata
 import json
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,16 @@ def make_cli(
             run = opt(run)  # type: ignore[assignment]
 
     _add_score_command(cli, runner_cls, default_results_dir)
+
+    @cli.command()
+    def keepalive() -> None:
+        """Block forever so the container stays alive for an orchestrator to exec into.
+
+        Wired as the image CMD with the runner as ENTRYPOINT: the default process is a
+        no-op that holds the container open (e.g. on Daytona, whose agent serves exec
+        independently of PID 1). Generation still runs via an explicit run_cmd exec.
+        """
+        signal.pause()
 
     return cli
 
