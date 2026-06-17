@@ -28,3 +28,7 @@ ENV {{ benchmark_upper }}_GENERATION_VERSION=${{ '{' }}{{ benchmark_upper }}_GEN
 
 VOLUME /app/results
 ENTRYPOINT ["{{ benchmark_name }}-runner"]
+# Default to a no-op keepalive so the container stays exec-able when booted with no
+# args (e.g. cloud sandbox providers that run ENTRYPOINT+CMD and serve exec out of band).
+# Orchestrated generation overrides this by passing `run ...` as the command.
+CMD ["keepalive"]
