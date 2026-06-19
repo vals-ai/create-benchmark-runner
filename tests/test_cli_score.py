@@ -33,7 +33,7 @@ def _seed_run(tmp_path, *, all_evaluated: bool):
 
 
 def test_score_writes_final_score_when_complete(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     _seed_run(tmp_path, all_evaluated=True)
@@ -61,7 +61,7 @@ def test_score_writes_final_score_when_complete(make_test_adapter, tmp_path, mon
 
 
 def test_score_incomplete_run_requires_force(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     _seed_run(tmp_path, all_evaluated=False)
@@ -100,7 +100,7 @@ def test_score_incomplete_run_requires_force(make_test_adapter, tmp_path, monkey
 
 
 def test_score_dataset_file_override_sets_dataset_for_final_score(tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     dataset_file = tmp_path / "dataset.json"

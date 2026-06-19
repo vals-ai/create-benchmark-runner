@@ -8,11 +8,11 @@ from benchmark_service.client import BenchmarkServiceClient
 def auth_headers() -> dict[str, str]:
     """Build auth headers from environment variables.
 
-    Prefers Descope (VALS_AUTH_KEY → x-descope-api-key) over legacy bearer
+    Prefers Descope (VALS_API_KEY → x-descope-api-key) over legacy bearer
     (BENCHMARK_API_KEY → Authorization: Bearer).
     """
     headers: dict[str, str] = {}
-    descope_key = os.environ.get("VALS_AUTH_KEY")
+    descope_key = os.environ.get("VALS_API_KEY")
     bearer_key = os.environ.get("BENCHMARK_API_KEY")
     if descope_key:
         headers["x-descope-api-key"] = descope_key

@@ -76,7 +76,7 @@ By default a runner reads tasks from its bundled JSON file (the `default_dataset
   --dataset-name validation
 ```
 
-Auth: Descope only — the runner forwards `VALS_AUTH_KEY` as `x-descope-api-key`. Legacy bearer auth (`BENCHMARK_API_KEY`) is rejected by `/v1/*` with 403, so service-loading requires the deploy to have Descope configured.
+Auth: Descope only — the runner forwards `VALS_API_KEY` as `x-descope-api-key`. Legacy bearer auth (`BENCHMARK_API_KEY`) is rejected by `/v1/*` with 403, so service-loading requires the deploy to have Descope configured.
 
 `--dataset-name` and `--dataset-file` are mutually exclusive. The existing `--problem <file>` Valkyrie path is unaffected (it never touches the dataset API). If the benchmark service hasn't implemented `list_tasks`, the runner gets a 501 from the endpoint and the run fails with a clear error.
 

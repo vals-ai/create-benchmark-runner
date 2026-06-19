@@ -37,12 +37,12 @@ By default the runner reads tasks from the bundled dataset file. If the benchmar
     --dataset-name validation
 ```
 
-`--dataset-name` is mutually exclusive with `--dataset-file` and requires Descope auth through `VALS_AUTH_KEY`; legacy `BENCHMARK_API_KEY` bearer auth does not work on `/v1/*` endpoints.
+`--dataset-name` is mutually exclusive with `--dataset-file` and requires Descope auth through `VALS_API_KEY`; legacy `BENCHMARK_API_KEY` bearer auth does not work on `/v1/*` endpoints.
 
 If the service returns benchmark-specific task fields, define a `Task` subclass and set `TASK_MODEL` on the runner so fetched tasks are validated before `generate()` receives them.
 
 ## Environment
 
 - `SERVICE_URL` — benchmark service URL (override with `--service-url`)
-- `VALS_AUTH_KEY` (Descope) **or** `BENCHMARK_API_KEY` (bearer) — auth
+- `VALS_API_KEY` (Descope) **or** `BENCHMARK_API_KEY` (bearer) — auth
 - `{{ benchmark_upper }}_GENERATION_VERSION` — provenance stamp baked into generation.json
