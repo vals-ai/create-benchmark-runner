@@ -15,7 +15,7 @@ from benchmark_service.v1_schemas import V1DatasetTasksResponse, V1Task
 
 
 def test_run_writes_generation_and_eval(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     TestRunner = make_test_adapter()
@@ -59,7 +59,7 @@ def test_run_writes_generation_and_eval(make_test_adapter, tmp_path, monkeypatch
 
 
 def test_run_skip_eval_writes_generation_only(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     TestRunner = make_test_adapter()
@@ -83,7 +83,7 @@ def test_run_skip_eval_writes_generation_only(make_test_adapter, tmp_path, monke
 
 
 def test_run_resume_skips_already_done(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     TestRunner = make_test_adapter()
@@ -120,7 +120,7 @@ def test_run_resume_skips_already_done(make_test_adapter, tmp_path, monkeypatch)
 
 
 def test_run_explicit_task_ids_filters(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     TestRunner = make_test_adapter()
@@ -149,7 +149,7 @@ def test_run_explicit_task_ids_filters(make_test_adapter, tmp_path, monkeypatch)
 
 
 def test_run_problem_mode_creates_single_task(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     problem = tmp_path / "problem.txt"
@@ -198,7 +198,7 @@ def test_run_problem_requires_exactly_one_task_id(make_test_adapter, tmp_path):
 
 
 def test_run_exits_nonzero_when_eval_errors(make_test_adapter, tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     TestRunner = make_test_adapter()
@@ -225,7 +225,7 @@ def test_run_exits_nonzero_when_eval_errors(make_test_adapter, tmp_path, monkeyp
 
 
 def test_run_enforces_task_timeout(tmp_path, monkeypatch):
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     class SlowRunner(BenchmarkRunner):
@@ -269,7 +269,7 @@ def test_run_with_dataset_name_fetches_from_service_and_skips_file(
     make_test_adapter, tmp_path, monkeypatch,
 ):
     """--dataset-name triggers service fetch; --dataset-file is ignored."""
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     TestRunner = make_test_adapter()
@@ -553,7 +553,7 @@ def test_run_resume_file_task_source_does_not_infer_service_loading(
 def test_run_resume_restores_file_backed_dataset_file(tmp_path, monkeypatch):
     """Resuming a file-backed run must reload the dataset file frozen in
     run_config.json, not silently fall back to default_dataset_file."""
-    monkeypatch.delenv("VALS_AUTH_KEY", raising=False)
+    monkeypatch.delenv("VALS_API_KEY", raising=False)
     monkeypatch.delenv("BENCHMARK_API_KEY", raising=False)
 
     default_file = tmp_path / "default.json"
