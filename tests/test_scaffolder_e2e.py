@@ -22,10 +22,12 @@ def test_e2e_generated_runner_is_well_formed(tmp_path, monkeypatch):
     pyproject = tomllib.loads((out / "pyproject.toml").read_text())
     assert pyproject["project"]["name"] == "cyber-bench-runner"
     assert pyproject["project"]["scripts"]["cyber-bench-runner"] == "runner.cli:cli"
+    assert pyproject["tool"]["uv"]["exclude-newer"] == "7 days"
 
     dockerfile = (out / "Dockerfile").read_text()
     assert "cyber-bench-runner" in dockerfile
     assert "CYBER_BENCH_GENERATION_VERSION" in dockerfile
+    assert "ghcr.io/astral-sh/uv:0.13.5@sha256:" in dockerfile
 
     bench = (out / "runner/benchmark.py").read_text()
     assert "class CyberBenchRunner(BenchmarkRunner):" in bench

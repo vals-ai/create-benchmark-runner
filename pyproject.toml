@@ -54,3 +54,6 @@ exclude = ["src/benchmark_runner/templates/**", ".venv/**"]
 [tool.ruff]
 line-length = 120
 target-version = "py312"
+
+[tool.uv]
+exclude-newer = "7 days"
